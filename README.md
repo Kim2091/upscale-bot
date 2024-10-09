@@ -78,4 +78,5 @@ You can adjust various settings in the `config.ini` file:
 ## Acknowledgements
 
 - This bot uses the [Spandrel](https://github.com/chaiNNer-org/spandrel) library for loading and handling models.
+- Thanks to [@the-database](https://github.com/the-database) for the benchmarks contained in `vram_data.csv`
 - Thanks to the Discord.py team for their excellent Discord API wrapper.

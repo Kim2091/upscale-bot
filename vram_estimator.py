@@ -1,5 +1,3 @@
-# vram_estimator.py
-
 import csv
 import os
 import torch
