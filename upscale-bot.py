@@ -17,7 +17,6 @@ import traceback
 import gc
 import aiohttp
 
-
 # Install extra architectures
 spandrel_extra_arches.install()
 
@@ -30,7 +29,7 @@ ADMIN_ID = config['Discord']['AdminId']
 MODEL_PATH = config['Paths']['ModelPath']
 MAX_TILE_SIZE = int(config['Processing']['MaxTileSize'])
 PRECISION = config['Processing'].get('Precision', 'auto').lower()
-MAX_TOTAL_PIXELS = int(config['Processing']['MaxTotalPixels'])
+MAX_OUTPUT_TOTAL_PIXELS = int(config['Processing']['MaxOutputTotalPixels'])
 UPSCALE_TIMEOUT = int(config['Processing'].get('UpscaleTimeout', 60))
 OTHER_STEP_TIMEOUT = int(config['Processing'].get('OtherStepTimeout', 30))
 THREAD_POOL_WORKERS = int(config['Processing'].get('ThreadPoolWorkers', 1))
@@ -39,8 +38,6 @@ MAX_CONCURRENT_UPSCALES = int(config['Processing'].get('MaxConcurrentUpscales', 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='--', intents=intents)
-
-
 
 # Create a ThreadPoolExecutor for running CPU-bound tasks
 thread_pool = ThreadPoolExecutor(max_workers=THREAD_POOL_WORKERS)
@@ -161,6 +158,9 @@ Use --models to see available models.
             await ctx.send(f"Model '{model_name}' not found. Use --models to see available models.")
             return
 
+        # Load the model descriptor
+        model_descriptor = load_model(model_name)
+
         if len(ctx.message.attachments) > 0:
             attachment = ctx.message.attachments[0]
             if not attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
@@ -189,15 +189,24 @@ Use --models to see available models.
             await ctx.send("Please either attach an image or provide a valid image URL.")
             return
 
-        # Check total number of pixels
-        total_pixels = image.width * image.height
-        if total_pixels > MAX_TOTAL_PIXELS:
-            await ctx.send(f"Error: Image size exceeds the maximum allowed total pixels of {MAX_TOTAL_PIXELS}.")
+        # Calculate the output image size
+        input_width, input_height = image.size
+        scale = model_descriptor.scale
+        output_width = input_width * scale
+        output_height = input_height * scale
+        output_total_pixels = output_width * output_height
+
+        # Check if the output size exceeds the limit
+        if output_total_pixels > MAX_OUTPUT_TOTAL_PIXELS:
+            max_megapixels = MAX_OUTPUT_TOTAL_PIXELS / (1024 * 1024)
+            await ctx.send(f"Error: The output image size ({output_width}x{output_height}, {output_total_pixels / (1024 * 1024):.2f} megapixels) would exceed the maximum allowed total of {max_megapixels:.2f} megapixels ({MAX_OUTPUT_TOTAL_PIXELS:,} pixels).")
             return
 
-        # Instead of processing immediately, add the task to the queue
-        await upscale_queue.put(process_upscale(ctx, model_name, image))
-        await ctx.send("Your upscale request has been queued. We'll process it as soon as possible.")
+        # Send the queue message and store its reference
+        queue_msg = await ctx.send("Your upscale request has been queued. We'll process it as soon as possible.")
+        
+        # Add the task to the queue, passing the queue message reference
+        await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg))
 
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
@@ -205,10 +214,12 @@ Use --models to see available models.
         print(f"Error in upscale command:")
         traceback.print_exc()
         
-async def process_upscale(ctx, model_name, image):
+async def process_upscale(ctx, model_name, image, queue_msg):
     monitor_task = None
+    status_messages = [queue_msg]  # Start with the queue message
     try:
-        await ctx.send("Processing your image. This may take a while...")
+        processing_msg = await ctx.send("Processing your image. This may take a while...")
+        status_messages.append(processing_msg)
 
         step_logger.log_step("Preparing model and estimating VRAM usage")
         model = load_model(model_name)
@@ -260,7 +271,8 @@ async def process_upscale(ctx, model_name, image):
         step_logger.log_step("Uploading upscaled image")
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
-                await ctx.send("Here's your upscaled image:", file=discord.File(fp=output_buffer, filename='upscaled.png'))
+                # Ping the user who requested the upscale
+                await ctx.send(f"<@{ctx.author.id}> Here's your upscaled image:", file=discord.File(fp=output_buffer, filename='upscaled.png'))
         except asyncio.TimeoutError:
             print(f"Error: Image upload took too long and was cancelled.")
             await ctx.send("Error: Image upload took too long and was cancelled.")
@@ -270,6 +282,13 @@ async def process_upscale(ctx, model_name, image):
         total_time = time.time() - start_time
         print(f"Image uploaded in {upload_time:.2f} seconds")
         print(f"Total processing time: {total_time:.2f} seconds")
+
+        # Delete status messages after successful upscale
+        for msg in status_messages:
+            try:
+                await msg.delete()
+            except discord.errors.NotFound:
+                pass  # Message was already deleted, ignore the error
 
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error processing upscale! {str(e)}"
@@ -338,7 +357,23 @@ async def list_models(ctx):
     if not available_models:
         await ctx.send("No models are currently available.")
     else:
-        model_list = "\n".join(available_models)
-        await ctx.send(f"Available models:\n```\n{model_list}\n```")
+        # Sort the models alphabetically
+        available_models.sort()
+        
+        # Calculate the maximum number of models per message
+        max_models_per_message = 50  # Adjust this number as needed
+        
+        # Split the models into chunks
+        model_chunks = [available_models[i:i + max_models_per_message] 
+                        for i in range(0, len(available_models), max_models_per_message)]
+        
+        for i, chunk in enumerate(model_chunks, 1):
+            model_list = "\n".join(chunk)
+            message = f"Available models (Page {i}/{len(model_chunks)}):\n```\n{model_list}\n```"
+            await ctx.send(message)
+        
+        # If there are multiple pages, send a summary message
+        if len(model_chunks) > 1:
+            await ctx.send(f"Total number of available models: {len(available_models)}")
 
 bot.run(TOKEN)
