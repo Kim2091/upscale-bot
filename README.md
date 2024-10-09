@@ -24,12 +24,13 @@ A Discord bot that performs image upscaling using various super-resolution model
    cd upscale-bot
    ```
 
-2. Install the required dependencies:
+2. Install the latest PyTorch CUDA version for your system here: https://pytorch.org/get-started/locally/
+3. Install the other required dependencies:
    ```
    pip install -r requirements.txt
    ```
 
-3. Open the `config.ini` file in the project root directory and replace `YOUR_DISCORD_BOT_TOKEN` and `YOUR_DISCORD_USER_ID` with your actual Discord bot token and user ID. Set this up at https://discord.com/developers/
+4. Open the `config.ini` file in the project root directory and replace `YOUR_DISCORD_BOT_TOKEN` and `YOUR_DISCORD_USER_ID` with your actual Discord bot token and user ID. Set this up at https://discord.com/developers/
   - The bot needs the `bot` scope (and maybe `applications.commands`), then:
     - Send Messages
     - Attach Files
