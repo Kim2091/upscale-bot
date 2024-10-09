@@ -38,7 +38,7 @@ MAX_CONCURRENT_UPSCALES = int(config['Processing'].get('MaxConcurrentUpscales', 
 
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='--', intents=intents)
 
 
 
@@ -48,8 +48,7 @@ thread_pool = ThreadPoolExecutor(max_workers=THREAD_POOL_WORKERS)
 # Model loading
 models = {}
 last_cleanup_time = time.time()
-CLEANUP_INTERVAL = 35  # 3 hours in seconds
-# 3 * 60 * 60
+CLEANUP_INTERVAL = 3 * 60 * 60  # 3 hours in seconds
 
 def load_model(model_name):
     if model_name in models:
@@ -143,14 +142,14 @@ async def upscale(ctx, model_name: str = None, image_url: str = None):
         if model_name is None:
             help_text = """
 To use the upscale command, either:
-1. Attach an image and type: !upscale <model_name>
-2. Provide an image URL: !upscale <model_name> <image_url>
+1. Attach an image and type: --upscale <model_name>
+2. Provide an image URL: --upscale <model_name> <image_url>
 
-Example: !upscale RealESRGAN_x4plus https://example.com/image.jpg
+Example: --upscale RealESRGAN_x4plus https://example.com/image.jpg
 
 Available commands:
-!upscale <model_name> [image_url] - Upscale an image using the specified model
-!models - List all available upscaling models
+--upscale <model_name> [image_url] - Upscale an image using the specified model
+--models - List all available upscaling models
 
 Use !models to see available models.
 """
@@ -159,7 +158,7 @@ Use !models to see available models.
 
         available_models = list_available_models()
         if model_name not in available_models:
-            await ctx.send(f"Model '{model_name}' not found. Use !models to see available models.")
+            await ctx.send(f"Model '{model_name}' not found. Use --models to see available models.")
             return
 
         if len(ctx.message.attachments) > 0:
@@ -319,7 +318,7 @@ def upscale_image(image, model, tile_size):
 
     return output_image
     
-# Clears model cache every 3 hours
+# Clears model cache every x hours (set above)
 async def cleanup_models():
     global models, last_cleanup_time
     while True:
