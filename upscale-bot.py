@@ -151,7 +151,7 @@ Available commands:
 --upscale <model_name> [image_url] - Upscale an image using the specified model
 --models - List all available upscaling models
 
-Use !models to see available models.
+Use --models to see available models.
 """
             await ctx.send(help_text)
             return
