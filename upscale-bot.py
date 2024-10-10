@@ -16,6 +16,7 @@ import time
 import traceback
 import gc
 import aiohttp
+from fuzzy_model_matcher import find_closest_model, search_models
 
 # Install extra architectures
 spandrel_extra_arches.install()
@@ -134,6 +135,8 @@ async def download_image(url):
 
 @bot.command()
 async def upscale(ctx, model_name: str = None, image_url: str = None):
+    selection_msg = None
+    confirmation_msg = None
     try:
         step_logger.log_step("Initializing upscale command")
         if model_name is None:
@@ -155,8 +158,37 @@ Use --models to see available models.
 
         available_models = list_available_models()
         if model_name not in available_models:
-            await ctx.send(f"Model '{model_name}' not found. Use --models to see available models.")
-            return
+            closest_matches = find_closest_model(model_name, available_models)
+            if closest_matches:
+                best_match, similarity = closest_matches[0]
+                if similarity >= 90:
+                    model_name = best_match
+                    auto_selection_msg = await ctx.send(f"Using model with high similarity: {model_name} (similarity: {similarity}%)")
+                else:
+                    match_message = "Did you mean one of these? Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%)" for i, match in enumerate(closest_matches))
+                    selection_msg = await ctx.send(f"Model '{model_name}' not found. {match_message}\nOr type 'cancel' to abort.")
+                    
+                    def check(m):
+                        return m.author == ctx.author and m.channel == ctx.channel and (m.content.isdigit() or m.content.lower() == 'cancel')
+                    
+                    try:
+                        reply = await bot.wait_for('message', check=check, timeout=30.0)
+                        if reply.content.lower() == 'cancel':
+                            await ctx.send("Upscale operation cancelled.")
+                            return
+                        selection = int(reply.content)
+                        if 1 <= selection <= len(closest_matches):
+                            model_name = closest_matches[selection-1][0]
+                            confirmation_msg = await ctx.send(f"Selected model: {model_name}")
+                        else:
+                            await ctx.send("Invalid selection. Upscale operation cancelled.")
+                            return
+                    except asyncio.TimeoutError:
+                        await ctx.send("Selection timed out. Upscale operation cancelled.")
+                        return
+            else:
+                await ctx.send(f"Model '{model_name}' not found and no close matches. Use --models to see available models.")
+                return
 
         # Load the model descriptor
         model_descriptor = load_model(model_name)
@@ -205,7 +237,7 @@ Use --models to see available models.
         # Send the queue message and store its reference
         queue_msg = await ctx.send("Your upscale request has been queued. We'll process it as soon as possible.")
         
-        # Add the task to the queue, passing the queue message reference
+        # Add the task to the queue, passing the queue message reference and model name
         await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg))
 
     except Exception as e:
@@ -213,7 +245,13 @@ Use --models to see available models.
         await ctx.send(error_message)
         print(f"Error in upscale command:")
         traceback.print_exc()
-        
+    finally:
+        # Clean up messages
+        if selection_msg:
+            await selection_msg.delete()
+        if confirmation_msg:
+            await confirmation_msg.delete()
+
 async def process_upscale(ctx, model_name, image, queue_msg):
     monitor_task = None
     status_messages = [queue_msg]  # Start with the queue message
@@ -271,8 +309,8 @@ async def process_upscale(ctx, model_name, image, queue_msg):
         step_logger.log_step("Uploading upscaled image")
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
-                # Ping the user who requested the upscale
-                await ctx.send(f"<@{ctx.author.id}> Here's your upscaled image:", file=discord.File(fp=output_buffer, filename='upscaled.png'))
+                # Include the model name in the upload message
+                await ctx.send(f"<@{ctx.author.id}> Here's your image upscaled with {model_name}:", file=discord.File(fp=output_buffer, filename='upscaled.png'))
         except asyncio.TimeoutError:
             print(f"Error: Image upload took too long and was cancelled.")
             await ctx.send("Error: Image upload took too long and was cancelled.")
@@ -302,6 +340,13 @@ async def process_upscale(ctx, model_name, image, queue_msg):
         torch.cuda.empty_cache()
         gc.collect()
         print("Upscale cleanup completed, returned to idle state.")
+
+        # Delete status messages after successful upscale
+        for msg in status_messages:
+            try:
+                await msg.delete()
+            except discord.errors.NotFound:
+                pass  # Message was already deleted, ignore the error
 
 def upscale_image(image, model, tile_size):
     step_logger.log_step("Converting image to tensor")
@@ -352,28 +397,38 @@ async def cleanup_models():
             print("Cache cleanup completed. All models unloaded and memory freed.")
 
 @bot.command(name='models')
-async def list_models(ctx):
+async def list_models(ctx, search_term: str = None):
     available_models = list_available_models()
     if not available_models:
         await ctx.send("No models are currently available.")
-    else:
-        # Sort the models alphabetically
-        available_models.sort()
-        
-        # Calculate the maximum number of models per message
-        max_models_per_message = 50  # Adjust this number as needed
-        
-        # Split the models into chunks
-        model_chunks = [available_models[i:i + max_models_per_message] 
-                        for i in range(0, len(available_models), max_models_per_message)]
-        
-        for i, chunk in enumerate(model_chunks, 1):
-            model_list = "\n".join(chunk)
-            message = f"Available models (Page {i}/{len(model_chunks)}):\n```\n{model_list}\n```"
-            await ctx.send(message)
-        
-        # If there are multiple pages, send a summary message
-        if len(model_chunks) > 1:
-            await ctx.send(f"Total number of available models: {len(available_models)}")
+        return
+
+    if search_term:
+        matches = search_models(search_term, available_models)
+        if matches:
+            match_list = "\n".join(f"{match[0]} (similarity: {match[1]}%)" for match in matches)
+            await ctx.send(f"Models matching '{search_term}':\n```\n{match_list}\n```")
+        else:
+            await ctx.send(f"No models found matching '{search_term}'.")
+        return
+
+    # Sort the models alphabetically
+    available_models.sort()
+    
+    # Calculate the maximum number of models per message
+    max_models_per_message = 50  # Adjust this number as needed
+    
+    # Split the models into chunks
+    model_chunks = [available_models[i:i + max_models_per_message] 
+                    for i in range(0, len(available_models), max_models_per_message)]
+    
+    for i, chunk in enumerate(model_chunks, 1):
+        model_list = "\n".join(chunk)
+        message = f"Available models (Page {i}/{len(model_chunks)}):\n```\n{model_list}\n```"
+        await ctx.send(message)
+    
+    # If there are multiple pages, send a summary message
+    if len(model_chunks) > 1:
+        await ctx.send(f"Total number of available models: {len(available_models)}")
 
 bot.run(TOKEN)
