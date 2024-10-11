@@ -50,13 +50,13 @@ A Discord bot that performs image upscaling using various super-resolution model
 
    - To upscale an image:
      ```
-     !upscale <model_name>
+     --upscale <model_name>
      ```
      Attach the image you want to upscale when sending this command.
 
    - To list available models:
      ```
-     !models
+     --models
      ```
 
 ## Configuration
