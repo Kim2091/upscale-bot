@@ -138,6 +138,26 @@ async def upscale(ctx, *args):
     try:
         step_logger.log_step("Initializing upscale command")
         
+        help_text = """ To use the upscale command, either:
+1. Attach an image and type: 
+   `--upscale <model_name> [alpha_handling]`
+2. Provide an image URL: 
+   `--upscale <model_name> <image_url> [alpha_handling]`
+
+Example:
+`--upscale RealESRGAN_x4plus https://example.com/image.jpg resize`
+
+Alpha handling options: `upscale`, `resize`, `discard`
+If not specified, the default from the config will be used.
+
+Available commands:
+`--upscale <model_name> [image_url] [alpha_handling]` - Upscale an image using the specified model
+`--models` - List all available upscaling models
+
+Use `--models` to see available models. """
+
+        step_logger.log_step("Initializing upscale command")
+        
         # Parse arguments
         model_name = None
         image_url = None
@@ -154,7 +174,7 @@ async def upscale(ctx, *args):
                 alpha_handling = args[1]
         
         if model_name is None:
-            await ctx.send("Please provide a model name. Use --models to see available models.")
+            await ctx.send(help_text)
             return
 
         alpha_handling = alpha_handling.lower() if alpha_handling else DEFAULT_ALPHA_HANDLING
