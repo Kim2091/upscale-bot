@@ -17,6 +17,7 @@ import traceback
 import gc
 import aiohttp
 from fuzzy_model_matcher import find_closest_model, search_models
+from alpha_handler import handle_alpha
 
 # Install extra architectures
 spandrel_extra_arches.install()
@@ -35,6 +36,8 @@ UPSCALE_TIMEOUT = int(config['Processing'].get('UpscaleTimeout', 60))
 OTHER_STEP_TIMEOUT = int(config['Processing'].get('OtherStepTimeout', 30))
 THREAD_POOL_WORKERS = int(config['Processing'].get('ThreadPoolWorkers', 1))
 MAX_CONCURRENT_UPSCALES = int(config['Processing'].get('MaxConcurrentUpscales', 1))
+DEFAULT_ALPHA_HANDLING = config['Processing'].get('DefaultAlphaHandling', 'resize').lower()
+GAMMA_CORRECTION = config['Processing'].getboolean('GammaCorrection', False)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -109,7 +112,6 @@ async def process_upscale_queue():
         finally:
             upscale_queue.task_done()
 
-# Allows the bot to handle linked images
 async def download_image(url):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -118,15 +120,11 @@ async def download_image(url):
             data = await resp.read()
             
             try:
-                # Attempt to open the image with PIL
                 image = Image.open(BytesIO(data))
                 
-                # Check if the format is supported
                 if image.format.lower() not in ['jpeg', 'png', 'gif', 'webp']:
                     return None, "The URL does not point to a supported image format. Supported formats are JPEG, PNG, GIF, and WebP."
                 
-                # Convert to RGB mode
-                image = image.convert('RGB')
                 return image, None
             except UnidentifiedImageError:
                 return None, "The URL does not point to a valid image file."
@@ -134,27 +132,35 @@ async def download_image(url):
                 return None, f"Error processing the image: {str(e)}"
 
 @bot.command()
-async def upscale(ctx, model_name: str = None, image_url: str = None):
+async def upscale(ctx, *args):
     selection_msg = None
     confirmation_msg = None
     try:
         step_logger.log_step("Initializing upscale command")
+        
+        # Parse arguments
+        model_name = None
+        image_url = None
+        alpha_handling = None
+        
+        if len(args) >= 1:
+            model_name = args[0]
+        if len(args) >= 2:
+            if args[1].startswith('http'):
+                image_url = args[1]
+                if len(args) >= 3:
+                    alpha_handling = args[2]
+            else:
+                alpha_handling = args[1]
+        
         if model_name is None:
-            help_text = """
-To use the upscale command, either:
-1. Attach an image and type: --upscale <model_name>
-2. Provide an image URL: --upscale <model_name> <image_url>
-
-Example: --upscale RealESRGAN_x4plus https://example.com/image.jpg
-
-Available commands:
---upscale <model_name> [image_url] - Upscale an image using the specified model
---models - List all available upscaling models
-
-Use --models to see available models.
-"""
-            await ctx.send(help_text)
+            await ctx.send("Please provide a model name. Use --models to see available models.")
             return
+
+        alpha_handling = alpha_handling.lower() if alpha_handling else DEFAULT_ALPHA_HANDLING
+        if alpha_handling not in ['upscale', 'resize', 'discard']:
+            await ctx.send(f"Invalid alpha handling option: {alpha_handling}. Using default: {DEFAULT_ALPHA_HANDLING}")
+            alpha_handling = DEFAULT_ALPHA_HANDLING
 
         available_models = list_available_models()
         if model_name not in available_models:
@@ -163,7 +169,7 @@ Use --models to see available models.
                 best_match, similarity = closest_matches[0]
                 if similarity >= 90:
                     model_name = best_match
-                    auto_selection_msg = await ctx.send(f"Using model with high similarity: {model_name} (similarity: {similarity}%)")
+                    await ctx.send(f"Using model with high similarity: {model_name} (similarity: {similarity}%)")
                 else:
                     match_message = "Did you mean one of these? Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%)" for i, match in enumerate(closest_matches))
                     selection_msg = await ctx.send(f"Model '{model_name}' not found. {match_message}\nOr type 'cancel' to abort.")
@@ -202,7 +208,7 @@ Use --models to see available models.
             try:
                 async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                     image_data = await attachment.read()
-                    image = Image.open(BytesIO(image_data)).convert('RGB')
+                    image = Image.open(BytesIO(image_data))
             except asyncio.TimeoutError:
                 await ctx.send("Error: Image reading took too long and was cancelled.")
                 return
@@ -234,11 +240,17 @@ Use --models to see available models.
             await ctx.send(f"Error: The output image size ({output_width}x{output_height}, {output_total_pixels / (1024 * 1024):.2f} megapixels) would exceed the maximum allowed total of {max_megapixels:.2f} megapixels ({MAX_OUTPUT_TOTAL_PIXELS:,} pixels).")
             return
 
+        # Check if the image has an alpha channel
+        has_alpha = image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
+
         # Send the queue message and store its reference
-        queue_msg = await ctx.send("Your upscale request has been queued. We'll process it as soon as possible.")
+        if has_alpha:
+            queue_msg = await ctx.send(f"Your upscale request has been queued. Alpha handling: {alpha_handling}")
+        else:
+            queue_msg = await ctx.send(f"Your upscale request has been queued.")
         
-        # Add the task to the queue, passing the queue message reference and model name
-        await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg))
+        # Add the task to the queue, passing the queue message reference, model name, and alpha handling
+        await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha))
 
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
@@ -252,7 +264,7 @@ Use --models to see available models.
         if confirmation_msg:
             await confirmation_msg.delete()
 
-async def process_upscale(ctx, model_name, image, queue_msg):
+async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha):
     monitor_task = None
     status_messages = [queue_msg]  # Start with the queue message
     try:
@@ -265,7 +277,18 @@ async def process_upscale(ctx, model_name, image, queue_msg):
         input_size = (image.width, image.height)
         estimated_vram, adjusted_tile_size = estimate_vram_and_tile_size(model, input_size, vram_data)
 
-        image_source = "attachment: " + ctx.message.attachments[0].filename if ctx.message.attachments else "provided URL"
+        # Get the original filename
+        if ctx.message.attachments:
+            original_filename = ctx.message.attachments[0].filename
+            image_source = f"attachment: {original_filename}"
+        else:
+            # If it's a URL, use a default filename
+            original_filename = "image.png"
+            image_source = "provided URL"
+
+        # Create the new filename with "_upscaled" appended
+        filename_parts = os.path.splitext(original_filename)
+        new_filename = f"{filename_parts[0]}_upscaled{filename_parts[1]}"
 
         print(f"Starting upscale of image from {image_source}")
         print(f"Model: {model_name}")
@@ -273,6 +296,7 @@ async def process_upscale(ctx, model_name, image, queue_msg):
         print(f"Input size: {input_size}")
         print(f"Estimated VRAM usage: {estimated_vram:.2f} GB")
         print(f"Adjusted tile size: {adjusted_tile_size}")
+        print(f"Alpha handling: {alpha_handling}")
 
         start_time = time.time()
 
@@ -282,7 +306,7 @@ async def process_upscale(ctx, model_name, image, queue_msg):
         loop = asyncio.get_event_loop()
         try:
             async with asyncio.timeout(UPSCALE_TIMEOUT):
-                result = await loop.run_in_executor(thread_pool, upscale_image, image, model, adjusted_tile_size)
+                result = await loop.run_in_executor(thread_pool, upscale_image, image, model, adjusted_tile_size, alpha_handling, has_alpha)
         except asyncio.TimeoutError:
             print(f"Error: Image processing took too long and was cancelled.")
             await ctx.send("Error: Image processing took too long and was cancelled.")
@@ -309,8 +333,11 @@ async def process_upscale(ctx, model_name, image, queue_msg):
         step_logger.log_step("Uploading upscaled image")
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
-                # Include the model name in the upload message
-                await ctx.send(f"<@{ctx.author.id}> Here's your image upscaled with {model_name}:", file=discord.File(fp=output_buffer, filename='upscaled.png'))
+                message = f"<@{ctx.author.id}> Here's your image upscaled with `{model_name}`"
+                if has_alpha:
+                    message += f" and alpha method `{alpha_handling}`"
+                message += ":"
+                await ctx.send(message, file=discord.File(fp=output_buffer, filename=new_filename))
         except asyncio.TimeoutError:
             print(f"Error: Image upload took too long and was cancelled.")
             await ctx.send("Error: Image upload took too long and was cancelled.")
@@ -348,41 +375,44 @@ async def process_upscale(ctx, model_name, image, queue_msg):
             except discord.errors.NotFound:
                 pass  # Message was already deleted, ignore the error
 
-def upscale_image(image, model, tile_size):
-    step_logger.log_step("Converting image to tensor")
-    img_tensor = torch.from_numpy(np.array(image)).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).cuda()
+def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
+    def upscale_func(img):
+        img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).cuda()
 
-    _, _, h, w = img_tensor.shape
-    output_h, output_w = h * model.scale, w * model.scale
+        _, _, h, w = img_tensor.shape
+        output_h, output_w = h * model.scale, w * model.scale
 
-    step_logger.log_step("Processing image in tiles")
-    output_dtype = torch.float32 if PRECISION == 'fp32' else torch.float16
-    output_tensor = torch.zeros((1, 3, output_h, output_w), dtype=output_dtype, device='cuda')
+        step_logger.log_step("Processing image in tiles")
+        output_dtype = torch.float32 if PRECISION == 'fp32' else torch.float16
+        output_tensor = torch.zeros((1, img_tensor.shape[1], output_h, output_w), dtype=output_dtype, device='cuda')
 
-    for y in range(0, h, tile_size):
-        for x in range(0, w, tile_size):
-            step_logger.log_step(f"Processing tile at ({x}, {y})")
-            tile = img_tensor[:, :, y:min(y+tile_size, h), x:min(x+tile_size, w)]
+        for y in range(0, h, tile_size):
+            for x in range(0, w, tile_size):
+                step_logger.log_step(f"Processing tile at ({x}, {y})")
+                tile = img_tensor[:, :, y:min(y+tile_size, h), x:min(x+tile_size, w)]
 
-            with torch.inference_mode():
-                if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
-                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                with torch.inference_mode():
+                    if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
+                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                            upscaled_tile = model(tile)
+                    elif model.supports_half and PRECISION in ['auto', 'fp16']:
+                        with torch.autocast(device_type='cuda', dtype=torch.float16):
+                            upscaled_tile = model(tile)
+                    else:
                         upscaled_tile = model(tile)
-                elif model.supports_half and PRECISION in ['auto', 'fp16']:
-                    with torch.autocast(device_type='cuda', dtype=torch.float16):
-                        upscaled_tile = model(tile)
-                else:
-                    upscaled_tile = model(tile)
 
-            output_tensor[:, :, y*model.scale:min((y+tile_size)*model.scale, output_h),
-                          x*model.scale:min((x+tile_size)*model.scale, output_w)].copy_(upscaled_tile)
+                output_tensor[:, :, y*model.scale:min((y+tile_size)*model.scale, output_h),
+                              x*model.scale:min((x+tile_size)*model.scale, output_w)].copy_(upscaled_tile)
 
-    step_logger.log_step("Converting output tensor to PIL Image")
-    output_image = Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+        step_logger.log_step("Converting output tensor to PIL Image")
+        return Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
 
-    return output_image
-    
-# Clears model cache every x hours (set above)
+    # Use the alpha_handler to process the image if it has an alpha channel
+    if has_alpha:
+        return handle_alpha(image, upscale_func, alpha_handling, GAMMA_CORRECTION)
+    else:
+        return upscale_func(image)
+
 async def cleanup_models():
     global models, last_cleanup_time
     while True:
