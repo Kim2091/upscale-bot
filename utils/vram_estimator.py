@@ -3,10 +3,10 @@ import os
 import torch
 import configparser
 import math
+from .config_reader import read_config
 
 # Read configuration
-config = configparser.ConfigParser()
-config.read('config.ini')
+config = read_config()
 
 VRAM_SAFETY_MULTIPLIER = float(config['Processing'].get('VRAMSafetyMultiplier', '1.2'))
 AVAILABLE_VRAM_USAGE_FRACTION = float(config['Processing'].get('AvailableVRAMUsageFraction', '0.8'))

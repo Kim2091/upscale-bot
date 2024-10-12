@@ -1,5 +1,5 @@
 aiohttp==3.10.9
-chainner-ext==0.3.10
+chainner_ext==0.3.10
 discord.py==2.4.0
 fuzzywuzzy==0.18.0
 numpy==2.1.2
