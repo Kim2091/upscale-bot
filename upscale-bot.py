@@ -1,23 +1,29 @@
+# Standard library imports
+import os
+import io
+import gc
+import time
+import asyncio
+import traceback
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor
+
+# Third-party library imports
+import torch
+import numpy as np
+import aiohttp
 import discord
 from discord.ext import commands
-import asyncio
-import os
 import configparser
-import torch
 from PIL import Image, UnidentifiedImageError
-import io
-from io import BytesIO
 import spandrel
 import spandrel_extra_arches
-import numpy as np
-from vram_estimator import estimate_vram_and_tile_size, get_free_vram, vram_data
-from concurrent.futures import ThreadPoolExecutor
-import time
-import traceback
-import gc
-import aiohttp
-from fuzzy_model_matcher import find_closest_model, search_models
-from alpha_handler import handle_alpha
+
+# Local module imports
+from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram, vram_data
+from utils.fuzzy_model_matcher import find_closest_model, search_models
+from utils.alpha_handler import handle_alpha
+from utils.resize_module import resize_image, resize_command
 
 # Install extra architectures
 spandrel_extra_arches.install()
@@ -73,6 +79,10 @@ def load_model(model_name):
 
 def list_available_models():
     return [os.path.splitext(f)[0] for f in os.listdir(MODEL_PATH) if f.endswith(('.pth', '.safetensors'))]
+
+@bot.command()
+async def resize(ctx, *args):
+    await resize_command(ctx, args, download_image, GAMMA_CORRECTION)
 
 # Add queue system
 upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
@@ -133,6 +143,7 @@ async def download_image(url):
 
 @bot.command()
 async def upscale(ctx, *args):
+    
     selection_msg = None
     confirmation_msg = None
     try:
@@ -153,6 +164,7 @@ If not specified, the default from the config will be used.
 Available commands:
 `--upscale <model_name> [image_url] [alpha_handling]` - Upscale an image using the specified model
 `--models` - List all available upscaling models
+`--resize <scale_factor> <method>` - Allows you to resize images up or down using normal scaling methods (e.g. bicubic, lanczos)
 
 Use `--models` to see available models. """
 
@@ -162,7 +174,11 @@ Use `--models` to see available models. """
         model_name = None
         image_url = None
         alpha_handling = None
-        
+
+        if args and args[0].lower() == 'downscale':
+            await downscale_command(ctx, args[1:], download_image, GAMMA_CORRECTION)
+            return
+
         if len(args) >= 1:
             model_name = args[0]
         if len(args) >= 2:
@@ -334,6 +350,13 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
 
         upscale_time = time.time() - start_time
         print(f"Upscale completed in {upscale_time:.2f} seconds")
+
+        # Add downscaling option within upscale result
+        if result.width * result.height > MAX_OUTPUT_TOTAL_PIXELS:
+            scale_factor = (MAX_OUTPUT_TOTAL_PIXELS / (result.width * result.height)) ** 0.5
+            await ctx.send(f"The upscaled image exceeds the maximum allowed size. Automatically downscaling with factor {scale_factor:.2f}.")
+            await process_downscale(ctx, args, result, scale_factor, 'lanczos', GAMMA_CORRECTION)
+            return
 
         step_logger.log_step("Saving upscaled image")
         output_buffer = io.BytesIO()

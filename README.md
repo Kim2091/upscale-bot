@@ -7,8 +7,10 @@ A Discord bot that performs image upscaling using various super-resolution model
 - Supports multiple super-resolution models through [spandrel](https://github.com/chaiNNer-org/spandrel/)
 - Configurable settings for VRAM usage and processing limits
 - Supports both .pth and .safetensors model formats
-- Implements a customizeable queuing system for handling multiple upscale requests
+- Implements a customizable queuing system for handling multiple upscale requests
 - Automatically adjusts tile size based on available VRAM
+- Resize an image with typical scaling filters
+- Fuzzy name matching
 
 ## Prerequisites
 
@@ -57,6 +59,10 @@ A Discord bot that performs image upscaling using various super-resolution model
    - To list available models:
      ```
      --models
+     ```
+   - To resize an image:
+     ```
+     --resize <scale_factor> <method>
      ```
 
 ## Configuration
