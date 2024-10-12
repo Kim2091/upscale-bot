@@ -204,39 +204,32 @@ Use `--models` to see available models. """
         if model_name not in available_models:
             closest_matches = find_closest_models(model_name, available_models)
             if closest_matches:
-                if len(closest_matches) == 1:
+                if len(closest_matches) == 1 or (closest_matches[0][1] - closest_matches[1][1] > 5):
                     best_match, similarity, match_type = closest_matches[0]
                     model_name = best_match
-                    await ctx.send(f"Using the only matching model: {model_name} (similarity: {similarity}%, match type: {match_type})")
+                    await ctx.send(f"Using model: {model_name} (similarity: {similarity}%, match type: {match_type})")
                 else:
-                    # Check if there's a single exact match
-                    exact_matches = [match for match in closest_matches if match[2] == "exact"]
-                    if len(exact_matches) == 1:
-                        model_name = exact_matches[0][0]
-                        await ctx.send(f"Using the exact matching model: {model_name}")
-                    else:
-                        # Present choices to the user
-                        match_message = "Multiple matches found. Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%, match type: {match[2]})" for i, match in enumerate(closest_matches))
-                        selection_msg = await ctx.send(f"{match_message}\nOr type 'cancel' to abort.")
-                        
-                        def check(m):
-                            return m.author == ctx.author and m.channel == ctx.channel and (m.content.isdigit() or m.content.lower() == 'cancel')
-                        
-                        try:
-                            reply = await bot.wait_for('message', check=check, timeout=30.0)
-                            if reply.content.lower() == 'cancel':
-                                await ctx.send("Upscale operation cancelled.")
-                                return
-                            selection = int(reply.content)
-                            if 1 <= selection <= len(closest_matches):
-                                model_name = closest_matches[selection-1][0]
-                                confirmation_msg = await ctx.send(f"Selected model: {model_name}")
-                            else:
-                                await ctx.send("Invalid selection. Upscale operation cancelled.")
-                                return
-                        except asyncio.TimeoutError:
-                            await ctx.send("Selection timed out. Upscale operation cancelled.")
+                    match_message = "Multiple close matches found. Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%, match type: {match[2]})" for i, match in enumerate(closest_matches))
+                    selection_msg = await ctx.send(f"Model '{model_name}' not found. {match_message}\nOr type 'cancel' to abort.")
+                    
+                    def check(m):
+                        return m.author == ctx.author and m.channel == ctx.channel and (m.content.isdigit() or m.content.lower() == 'cancel')
+                    
+                    try:
+                        reply = await bot.wait_for('message', check=check, timeout=30.0)
+                        if reply.content.lower() == 'cancel':
+                            await ctx.send("Upscale operation cancelled.")
                             return
+                        selection = int(reply.content)
+                        if 1 <= selection <= len(closest_matches):
+                            model_name = closest_matches[selection-1][0]
+                            confirmation_msg = await ctx.send(f"Selected model: {model_name}")
+                        else:
+                            await ctx.send("Invalid selection. Upscale operation cancelled.")
+                            return
+                    except asyncio.TimeoutError:
+                        await ctx.send("Selection timed out. Upscale operation cancelled.")
+                        return
             else:
                 await ctx.send(f"Model '{model_name}' not found and no close matches. Use --models to see available models.")
                 return
