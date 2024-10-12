@@ -209,8 +209,12 @@ Use `--models` to see available models. """
                     model_name = best_match
                     await ctx.send(f"Using model: {model_name} (similarity: {similarity}%, match type: {match_type})")
                 else:
-                    match_message = "Multiple close matches found. Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%, match type: {match[2]})" for i, match in enumerate(closest_matches))
-                    selection_msg = await ctx.send(f"Model '{model_name}' not found. {match_message}\nOr type 'cancel' to abort.")
+                    match_message = f"Model '{model_name}' not found. Multiple close matches found.\n\nPlease select a number:"
+                    for i, (match, similarity, match_type) in enumerate(closest_matches, 1):
+                        match_message += f"\n{i}. {match} (similarity: {similarity}%, match type: {match_type})"
+                    match_message += "\n\nOr type 'cancel' to abort."
+                    
+                    selection_msg = await ctx.send(match_message)
                     
                     def check(m):
                         return m.author == ctx.author and m.channel == ctx.channel and (m.content.isdigit() or m.content.lower() == 'cancel')
