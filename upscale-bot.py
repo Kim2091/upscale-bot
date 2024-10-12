@@ -21,7 +21,7 @@ import spandrel_extra_arches
 
 # Local module imports
 from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram, vram_data
-from utils.fuzzy_model_matcher import find_closest_model, search_models
+from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.alpha_handler import handle_alpha
 from utils.resize_module import resize_image, resize_command
 
@@ -146,6 +146,7 @@ async def upscale(ctx, *args):
     
     selection_msg = None
     confirmation_msg = None
+    queue_msg = None
     try:
         step_logger.log_step("Initializing upscale command")
         
@@ -198,36 +199,44 @@ Use `--models` to see available models. """
             await ctx.send(f"Invalid alpha handling option: {alpha_handling}. Using default: {DEFAULT_ALPHA_HANDLING}")
             alpha_handling = DEFAULT_ALPHA_HANDLING
 
+        # Model selection and validation
         available_models = list_available_models()
         if model_name not in available_models:
-            closest_matches = find_closest_model(model_name, available_models)
+            closest_matches = find_closest_models(model_name, available_models)
             if closest_matches:
-                best_match, similarity = closest_matches[0]
-                if similarity >= 90:
+                if len(closest_matches) == 1:
+                    best_match, similarity, match_type = closest_matches[0]
                     model_name = best_match
-                    await ctx.send(f"Using model with high similarity: {model_name} (similarity: {similarity}%)")
+                    await ctx.send(f"Using the only matching model: {model_name} (similarity: {similarity}%, match type: {match_type})")
                 else:
-                    match_message = "Did you mean one of these? Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%)" for i, match in enumerate(closest_matches))
-                    selection_msg = await ctx.send(f"Model '{model_name}' not found. {match_message}\nOr type 'cancel' to abort.")
-                    
-                    def check(m):
-                        return m.author == ctx.author and m.channel == ctx.channel and (m.content.isdigit() or m.content.lower() == 'cancel')
-                    
-                    try:
-                        reply = await bot.wait_for('message', check=check, timeout=30.0)
-                        if reply.content.lower() == 'cancel':
-                            await ctx.send("Upscale operation cancelled.")
+                    # Check if there's a single exact match
+                    exact_matches = [match for match in closest_matches if match[2] == "exact"]
+                    if len(exact_matches) == 1:
+                        model_name = exact_matches[0][0]
+                        await ctx.send(f"Using the exact matching model: {model_name}")
+                    else:
+                        # Present choices to the user
+                        match_message = "Multiple matches found. Please select a number:\n" + "\n".join(f"{i+1}. {match[0]} (similarity: {match[1]}%, match type: {match[2]})" for i, match in enumerate(closest_matches))
+                        selection_msg = await ctx.send(f"{match_message}\nOr type 'cancel' to abort.")
+                        
+                        def check(m):
+                            return m.author == ctx.author and m.channel == ctx.channel and (m.content.isdigit() or m.content.lower() == 'cancel')
+                        
+                        try:
+                            reply = await bot.wait_for('message', check=check, timeout=30.0)
+                            if reply.content.lower() == 'cancel':
+                                await ctx.send("Upscale operation cancelled.")
+                                return
+                            selection = int(reply.content)
+                            if 1 <= selection <= len(closest_matches):
+                                model_name = closest_matches[selection-1][0]
+                                confirmation_msg = await ctx.send(f"Selected model: {model_name}")
+                            else:
+                                await ctx.send("Invalid selection. Upscale operation cancelled.")
+                                return
+                        except asyncio.TimeoutError:
+                            await ctx.send("Selection timed out. Upscale operation cancelled.")
                             return
-                        selection = int(reply.content)
-                        if 1 <= selection <= len(closest_matches):
-                            model_name = closest_matches[selection-1][0]
-                            confirmation_msg = await ctx.send(f"Selected model: {model_name}")
-                        else:
-                            await ctx.send("Invalid selection. Upscale operation cancelled.")
-                            return
-                    except asyncio.TimeoutError:
-                        await ctx.send("Selection timed out. Upscale operation cancelled.")
-                        return
             else:
                 await ctx.send(f"Model '{model_name}' not found and no close matches. Use --models to see available models.")
                 return
@@ -235,6 +244,7 @@ Use `--models` to see available models. """
         # Load the model descriptor
         model_descriptor = load_model(model_name)
 
+        # Image acquisition (from attachment or URL)
         if len(ctx.message.attachments) > 0:
             attachment = ctx.message.attachments[0]
             if not attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
@@ -279,14 +289,15 @@ Use `--models` to see available models. """
         # Check if the image has an alpha channel
         has_alpha = image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
 
-        # Send the queue message and store its reference
-        if has_alpha:
-            queue_msg = await ctx.send(f"Your upscale request has been queued. Alpha handling: {alpha_handling}")
-        else:
-            queue_msg = await ctx.send(f"Your upscale request has been queued.")
-        
-        # Add the task to the queue, passing the queue message reference, model name, and alpha handling
-        await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha))
+        # Queue the upscale operation
+        if queue_msg is None:  # Ensure we only queue once
+            if has_alpha:
+                queue_msg = await ctx.send(f"Your upscale request has been queued. Alpha handling: {alpha_handling}")
+            else:
+                queue_msg = await ctx.send(f"Your upscale request has been queued.")
+            
+            # Add the task to the queue
+            await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha))
 
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"

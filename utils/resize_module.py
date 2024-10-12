@@ -19,7 +19,7 @@ def get_available_filters():
         'lanczos', 'catrom', 'mitchell', 'bspline', 'lagrange', 'gauss'
     ]
 
-def resize_image(image, scale_factor, method='lanczos', gamma_correction=True, ignore_scale_limits=False):
+def resize_image(image, scale_factor, method='box', gamma_correction=True, ignore_scale_limits=False):
     """
     Resize an image using chainner_ext and the specified method and scale factor.
     
@@ -133,13 +133,14 @@ async def resize_command(ctx, args, download_image, GAMMA_CORRECTION):
         filter_list = "\n".join(f"• {filter_name}" for filter_name in available_filters)
         
         usage_message = (
-            f"Usage: `--resize <scale_factor> <method> [image_url]`\n"
-            f"Or attach an image and use: `--resize <scale_factor> <method>`\n"
+            f"Usage: `--resize <scale_factor> [method] [image_url]`\n"
+            f"Or attach an image and use: `--resize <scale_factor> [method]`\n"
             f"Scale factor must be between {MIN_SCALE_FACTOR} and {MAX_SCALE_FACTOR} (inclusive).\n"
+            f"Default method is 'box' if not specified.\n"
             f"Available methods:\n{filter_list}"
         )
 
-        if len(args) < 2:
+        if len(args) < 1:
             await ctx.send(usage_message)
             return
 
@@ -148,16 +149,26 @@ async def resize_command(ctx, args, download_image, GAMMA_CORRECTION):
             if scale_factor < MIN_SCALE_FACTOR or scale_factor > MAX_SCALE_FACTOR:
                 await ctx.send(f"Scale factor must be between {MIN_SCALE_FACTOR} and {MAX_SCALE_FACTOR} (inclusive).")
                 return
-            method = args[1].lower()
         except ValueError:
-            await ctx.send(f"Invalid scale factor. Please ensure your scale factor is between {MIN_SCALE_FACTOR} and {MAX_SCALE_FACTOR}. Also ensure your command is in the valid format: `--resize <scale_factor> <method> [image_url]`")
+            await ctx.send(f"Invalid scale factor. Please ensure your scale factor is between {MIN_SCALE_FACTOR} and {MAX_SCALE_FACTOR}. Also ensure your command is in the valid format: `--resize <scale_factor> [method] [image_url]`")
             return
+
+        # Default method is 'box'
+        method = 'box'
+        image_url = None
+
+        # Parse remaining arguments
+        if len(args) > 1:
+            if args[1].lower() in available_filters:
+                method = args[1].lower()
+                if len(args) > 2:
+                    image_url = args[2]
+            else:
+                image_url = args[1]
 
         if method not in available_filters:
             await ctx.send(f"Unsupported method: {method}. Available methods are:\n{filter_list}")
             return
-
-        image_url = args[2] if len(args) > 2 else None
 
         if len(ctx.message.attachments) > 0:
             attachment = ctx.message.attachments[0]
