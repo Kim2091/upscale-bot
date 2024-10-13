@@ -91,13 +91,19 @@ def sanitize_error_message(error_message):
     
     return sanitized
 
-# Model management functions
 def load_model(model_name):
     if model_name in models:
         return models[model_name]
     
-    model_path = os.path.join(MODEL_PATH, f"{model_name}.pth")
-    if not os.path.exists(model_path):
+    # Check for both .pth and .safetensors files
+    pth_path = os.path.join(MODEL_PATH, f"{model_name}.pth")
+    safetensors_path = os.path.join(MODEL_PATH, f"{model_name}.safetensors")
+    
+    if os.path.exists(pth_path):
+        model_path = pth_path
+    elif os.path.exists(safetensors_path):
+        model_path = safetensors_path
+    else:
         raise ValueError(f"Model file not found: {model_name}")
     
     try:
