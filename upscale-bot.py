@@ -2,6 +2,7 @@
 import os
 import io
 import gc
+import re
 import time
 import asyncio
 import traceback
@@ -80,6 +81,16 @@ class StepLogger:
 
 step_logger = StepLogger()
 
+# Sanitize error messages
+def sanitize_error_message(error_message):
+    # Convert to string if it's not already
+    error_message = str(error_message)
+    
+    # Remove file paths
+    sanitized = re.sub(r'File ".*?"', 'File "[PATH REMOVED]"', error_message)
+    
+    return sanitized
+
 # Model management functions
 def load_model(model_name):
     if model_name in models:
@@ -87,7 +98,7 @@ def load_model(model_name):
     
     model_path = os.path.join(MODEL_PATH, f"{model_name}.pth")
     if not os.path.exists(model_path):
-        raise ValueError(f"Model file not found: {model_path}")
+        raise ValueError(f"Model file not found: {model_name}")
     
     try:
         model = spandrel.ModelLoader().load_from_file(model_path)
@@ -132,7 +143,15 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
         output_h, output_w = h * model.scale, w * model.scale
 
         step_logger.log_step("Processing image in tiles")
-        output_dtype = torch.float32 if PRECISION == 'fp32' else torch.float16
+
+        # Determine the output dtype based on model capabilities and PRECISION setting
+        if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
+            output_dtype = torch.bfloat16
+        elif model.supports_half and PRECISION in ['auto', 'fp16']:
+            output_dtype = torch.float16
+        else:
+            output_dtype = torch.float32
+
         output_tensor = torch.zeros((1, img_tensor.shape[1], output_h, output_w), dtype=output_dtype, device='cuda')
 
         for y in range(0, h, tile_size):
@@ -154,7 +173,7 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
                               x*model.scale:min((x+tile_size)*model.scale, output_w)].copy_(upscaled_tile)
 
         step_logger.log_step("Converting output tensor to PIL Image")
-        return Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+        return Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().float().numpy() * 255).astype(np.uint8))
 
     # Use the alpha_handler to process the image if it has an alpha channel
     if has_alpha:
@@ -329,7 +348,7 @@ Use `--models` to see available models. """
             await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha))
 
     except Exception as e:
-        error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
+        error_message = f"<@{ADMIN_ID}> Error! {sanitize_error_message(str(e))}"
         await ctx.send(error_message)
         print(f"Error in upscale command:")
         traceback.print_exc()
@@ -489,7 +508,7 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
                 pass  # Message was already deleted, ignore the error
 
     except Exception as e:
-        error_message = f"<@{ADMIN_ID}> Error processing upscale! {str(e)}"
+        error_message = f"<@{ADMIN_ID}> Error processing upscale! {sanitize_error_message(str(e))}"
         await ctx.send(error_message)
         print(f"Error in upscale processing:")
         traceback.print_exc()
