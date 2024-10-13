@@ -28,7 +28,7 @@ from utils.resize_module import resize_image, resize_command
 # Install extra architectures
 spandrel_extra_arches.install()
 
-# Read configuration
+# Configuration
 config = configparser.ConfigParser()
 config.read('config.ini')
 
@@ -45,18 +45,42 @@ MAX_CONCURRENT_UPSCALES = int(config['Processing'].get('MaxConcurrentUpscales', 
 DEFAULT_ALPHA_HANDLING = config['Processing'].get('DefaultAlphaHandling', 'resize').lower()
 GAMMA_CORRECTION = config['Processing'].getboolean('GammaCorrection', False)
 
+# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='--', intents=intents)
 
-# Create a ThreadPoolExecutor for running CPU-bound tasks
+# Thread pool and queue setup
 thread_pool = ThreadPoolExecutor(max_workers=THREAD_POOL_WORKERS)
+upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
+upscale_queue = asyncio.Queue()
 
-# Model loading
+# Model management
 models = {}
 last_cleanup_time = time.time()
 CLEANUP_INTERVAL = 3 * 60 * 60  # 3 hours in seconds
 
+# Utility classes
+class StepLogger:
+    def __init__(self):
+        self.current_step = ""
+        self.step_start_time = 0
+
+    def log_step(self, step_description):
+        self.current_step = step_description
+        self.step_start_time = time.time()
+        print(f"Step: {self.current_step}")
+
+    async def monitor_progress(self):
+        while True:
+            await asyncio.sleep(10)
+            if self.current_step and self.current_step != "Idle":
+                elapsed_time = time.time() - self.step_start_time
+                print(f"Still working on: {self.current_step} (Elapsed time: {elapsed_time:.2f}s)")
+
+step_logger = StepLogger()
+
+# Model management functions
 def load_model(model_name):
     if model_name in models:
         return models[model_name]
@@ -80,48 +104,7 @@ def load_model(model_name):
 def list_available_models():
     return [os.path.splitext(f)[0] for f in os.listdir(MODEL_PATH) if f.endswith(('.pth', '.safetensors'))]
 
-@bot.command()
-async def resize(ctx, *args):
-    await resize_command(ctx, args, download_image, GAMMA_CORRECTION)
-
-# Add queue system
-upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
-upscale_queue = asyncio.Queue()
-
-class StepLogger:
-    def __init__(self):
-        self.current_step = ""
-        self.step_start_time = 0
-
-    def log_step(self, step_description):
-        self.current_step = step_description
-        self.step_start_time = time.time()
-        print(f"Step: {self.current_step}")
-
-    async def monitor_progress(self):
-        while True:
-            await asyncio.sleep(10)
-            if self.current_step and self.current_step != "Idle":
-                elapsed_time = time.time() - self.step_start_time
-                print(f"Still working on: {self.current_step} (Elapsed time: {elapsed_time:.2f}s)")
-
-step_logger = StepLogger()
-
-@bot.event
-async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-    bot.loop.create_task(process_upscale_queue())
-    bot.loop.create_task(cleanup_models())  # Start the periodic cleanup task
-
-async def process_upscale_queue():
-    while True:
-        upscale_task = await upscale_queue.get()
-        try:
-            async with upscale_semaphore:
-                await upscale_task
-        finally:
-            upscale_queue.task_done()
-
+# Image processing functions
 async def download_image(url):
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -141,29 +124,74 @@ async def download_image(url):
             except Exception as e:
                 return None, f"Error processing the image: {str(e)}"
 
+def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
+    def upscale_func(img):
+        img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).cuda()
+
+        _, _, h, w = img_tensor.shape
+        output_h, output_w = h * model.scale, w * model.scale
+
+        step_logger.log_step("Processing image in tiles")
+        output_dtype = torch.float32 if PRECISION == 'fp32' else torch.float16
+        output_tensor = torch.zeros((1, img_tensor.shape[1], output_h, output_w), dtype=output_dtype, device='cuda')
+
+        for y in range(0, h, tile_size):
+            for x in range(0, w, tile_size):
+                step_logger.log_step(f"Processing tile at ({x}, {y})")
+                tile = img_tensor[:, :, y:min(y+tile_size, h), x:min(x+tile_size, w)]
+
+                with torch.inference_mode():
+                    if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
+                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                            upscaled_tile = model(tile)
+                    elif model.supports_half and PRECISION in ['auto', 'fp16']:
+                        with torch.autocast(device_type='cuda', dtype=torch.float16):
+                            upscaled_tile = model(tile)
+                    else:
+                        upscaled_tile = model(tile)
+
+                output_tensor[:, :, y*model.scale:min((y+tile_size)*model.scale, output_h),
+                              x*model.scale:min((x+tile_size)*model.scale, output_w)].copy_(upscaled_tile)
+
+        step_logger.log_step("Converting output tensor to PIL Image")
+        return Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
+
+    # Use the alpha_handler to process the image if it has an alpha channel
+    if has_alpha:
+        return handle_alpha(image, upscale_func, alpha_handling, GAMMA_CORRECTION)
+    else:
+        return upscale_func(image)
+
+# Bot event handlers
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has connected to Discord!')
+    bot.loop.create_task(process_upscale_queue())
+    bot.loop.create_task(cleanup_models())  # Start the periodic cleanup task
+
+# Bot commands
 @bot.command()
 async def upscale(ctx, *args):
-    
     selection_msg = None
     confirmation_msg = None
     queue_msg = None
     try:
         step_logger.log_step("Initializing upscale command")
         
-        help_text = """ To use the upscale command, either:
+        help_text = """ To use the upscale command:
 1. Attach an image and type: 
    `--upscale <model_name> [alpha_handling]`
 2. Provide an image URL: 
-   `--upscale <model_name> <image_url> [alpha_handling]`
+   `--upscale <model_name> [alpha_handling] <image_url>`
 
 Example:
-`--upscale RealESRGAN_x4plus https://example.com/image.jpg resize`
+`--upscale RealESRGAN_x4plus resize https://example.com/image.jpg`
 
 Alpha handling options: `upscale`, `resize`, `discard`
 If not specified, the default from the config will be used.
 
 Available commands:
-`--upscale <model_name> [image_url] [alpha_handling]` - Upscale an image using the specified model
+`--upscale <model_name> [alpha_handling] [image_url]` - Upscale an image using the specified model
 `--models` - List all available upscaling models
 `--resize <scale_factor> <method>` - Allows you to resize images up or down using normal scaling methods (e.g. bicubic, lanczos)
 
@@ -183,18 +211,22 @@ Use `--models` to see available models. """
         if len(args) >= 1:
             model_name = args[0]
         if len(args) >= 2:
-            if args[1].startswith('http'):
-                image_url = args[1]
-                if len(args) >= 3:
-                    alpha_handling = args[2]
-            else:
+            if args[1] in ['upscale', 'resize', 'discard']:
                 alpha_handling = args[1]
+                if len(args) >= 3:
+                    image_url = args[2]
+            elif args[1].startswith('http'):
+                image_url = args[1]
+            else:
+                await ctx.send(f"Invalid alpha handling option or image URL: {args[1]}. Using default alpha handling.")
+        if len(args) >= 3 and not image_url:
+            image_url = args[2]
         
         if model_name is None:
             await ctx.send(help_text)
             return
 
-        alpha_handling = alpha_handling.lower() if alpha_handling else DEFAULT_ALPHA_HANDLING
+        alpha_handling = alpha_handling if alpha_handling else DEFAULT_ALPHA_HANDLING
         if alpha_handling not in ['upscale', 'resize', 'discard']:
             await ctx.send(f"Invalid alpha handling option: {alpha_handling}. Using default: {DEFAULT_ALPHA_HANDLING}")
             alpha_handling = DEFAULT_ALPHA_HANDLING
@@ -307,6 +339,56 @@ Use `--models` to see available models. """
             await selection_msg.delete()
         if confirmation_msg:
             await confirmation_msg.delete()
+
+@bot.command()
+async def resize(ctx, *args):
+    await resize_command(ctx, args, download_image, GAMMA_CORRECTION)
+
+@bot.command(name='models')
+async def list_models(ctx, search_term: str = None):
+    available_models = list_available_models()
+    if not available_models:
+        await ctx.send("No models are currently available.")
+        return
+
+    if search_term:
+        matches = search_models(search_term, available_models)
+        if matches:
+            match_list = "\n".join(f"{match[0]} (similarity: {match[1]}%)" for match in matches)
+            await ctx.send(f"Models matching '{search_term}':\n```\n{match_list}\n```")
+        else:
+            await ctx.send(f"No models found matching '{search_term}'.")
+        return
+
+    # Sort the models alphabetically
+    available_models.sort()
+    
+    # Calculate the maximum number of models per message
+    max_models_per_message = 50  # Adjust this number as needed
+    
+    # Split the models into chunks
+    model_chunks = [available_models[i:i + max_models_per_message] 
+                    for i in range(0, len(available_models), max_models_per_message)]
+    
+    for i, chunk in enumerate(model_chunks, 1):
+        model_list = "\n".join(chunk)
+        message = f"Available models (Page {i}/{len(model_chunks)}):\n```\n{model_list}\n```"
+        await ctx.send(message)
+    
+    # If there are multiple pages, send a summary message
+    if len(model_chunks) > 1:
+        await ctx.send(f"Total number of available models: {len(available_models)}")
+
+
+# Queue processing
+async def process_upscale_queue():
+    while True:
+        upscale_task = await upscale_queue.get()
+        try:
+            async with upscale_semaphore:
+                await upscale_task
+        finally:
+            upscale_queue.task_done()
 
 async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha):
     monitor_task = None
@@ -426,44 +508,8 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
             except discord.errors.NotFound:
                 pass  # Message was already deleted, ignore the error
 
-def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
-    def upscale_func(img):
-        img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).cuda()
 
-        _, _, h, w = img_tensor.shape
-        output_h, output_w = h * model.scale, w * model.scale
-
-        step_logger.log_step("Processing image in tiles")
-        output_dtype = torch.float32 if PRECISION == 'fp32' else torch.float16
-        output_tensor = torch.zeros((1, img_tensor.shape[1], output_h, output_w), dtype=output_dtype, device='cuda')
-
-        for y in range(0, h, tile_size):
-            for x in range(0, w, tile_size):
-                step_logger.log_step(f"Processing tile at ({x}, {y})")
-                tile = img_tensor[:, :, y:min(y+tile_size, h), x:min(x+tile_size, w)]
-
-                with torch.inference_mode():
-                    if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
-                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                            upscaled_tile = model(tile)
-                    elif model.supports_half and PRECISION in ['auto', 'fp16']:
-                        with torch.autocast(device_type='cuda', dtype=torch.float16):
-                            upscaled_tile = model(tile)
-                    else:
-                        upscaled_tile = model(tile)
-
-                output_tensor[:, :, y*model.scale:min((y+tile_size)*model.scale, output_h),
-                              x*model.scale:min((x+tile_size)*model.scale, output_w)].copy_(upscaled_tile)
-
-        step_logger.log_step("Converting output tensor to PIL Image")
-        return Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8))
-
-    # Use the alpha_handler to process the image if it has an alpha channel
-    if has_alpha:
-        return handle_alpha(image, upscale_func, alpha_handling, GAMMA_CORRECTION)
-    else:
-        return upscale_func(image)
-
+# Cleanup task
 async def cleanup_models():
     global models, last_cleanup_time
     while True:
@@ -477,39 +523,6 @@ async def cleanup_models():
             last_cleanup_time = current_time
             print("Cache cleanup completed. All models unloaded and memory freed.")
 
-@bot.command(name='models')
-async def list_models(ctx, search_term: str = None):
-    available_models = list_available_models()
-    if not available_models:
-        await ctx.send("No models are currently available.")
-        return
-
-    if search_term:
-        matches = search_models(search_term, available_models)
-        if matches:
-            match_list = "\n".join(f"{match[0]} (similarity: {match[1]}%)" for match in matches)
-            await ctx.send(f"Models matching '{search_term}':\n```\n{match_list}\n```")
-        else:
-            await ctx.send(f"No models found matching '{search_term}'.")
-        return
-
-    # Sort the models alphabetically
-    available_models.sort()
-    
-    # Calculate the maximum number of models per message
-    max_models_per_message = 50  # Adjust this number as needed
-    
-    # Split the models into chunks
-    model_chunks = [available_models[i:i + max_models_per_message] 
-                    for i in range(0, len(available_models), max_models_per_message)]
-    
-    for i, chunk in enumerate(model_chunks, 1):
-        model_list = "\n".join(chunk)
-        message = f"Available models (Page {i}/{len(model_chunks)}):\n```\n{model_list}\n```"
-        await ctx.send(message)
-    
-    # If there are multiple pages, send a summary message
-    if len(model_chunks) > 1:
-        await ctx.send(f"Total number of available models: {len(available_models)}")
-
-bot.run(TOKEN)
+# Main execution
+if __name__ == "__main__":
+    bot.run(TOKEN)
