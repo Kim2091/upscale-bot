@@ -439,7 +439,6 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
 
         # Create the new filename with "_upscaled" appended
         filename_parts = os.path.splitext(original_filename)
-        new_filename = f"{filename_parts[0]}_upscaled{filename_parts[1]}"
 
         print(f"Starting upscale of image from {image_source}")
         print(f"Model: {model_name}")
@@ -473,18 +472,58 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
             await process_downscale(ctx, args, result, scale_factor, 'lanczos', GAMMA_CORRECTION)
             return
 
+        def estimate_file_size(img, format, **params):
+            temp_buffer = io.BytesIO()
+            img.save(temp_buffer, format=format, **params)
+            return temp_buffer.tell()
+
+        def find_webp_quality(img, max_size):
+            low, high = 1, 100
+            while low <= high:
+                mid = (low + high) // 2
+                size = estimate_file_size(img, 'WEBP', quality=mid)
+                if size < max_size:
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            return high
+
         step_logger.log_step("Saving upscaled image")
         output_buffer = io.BytesIO()
+        save_format = 'WEBP (lossless)'
+        new_filename = f"{filename_parts[0]}_upscaled.webp"
+        max_file_size = 25 * 1024 * 1024  # 25 MB in bytes
+        compression_info = None
+
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
-                await loop.run_in_executor(thread_pool, result.save, output_buffer, 'PNG')
-        except asyncio.TimeoutError:
-            print(f"Error: Image saving took too long and was cancelled.")
-            await ctx.send("Error: Image saving took too long and was cancelled.")
-            return
+                # Try WebP lossless first
+                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', lossless=True))
+                if output_buffer.tell() > max_file_size:
+                    raise Exception("WebP lossless file size too large")
+        except Exception as e:
+            print(f"WebP lossless save failed: {str(e)}")
+            output_buffer.seek(0)
+            output_buffer.truncate(0)
+            
+            try:
+                # Try WebP lossy with quality adjustment
+                webp_quality = await loop.run_in_executor(thread_pool, find_webp_quality, result, max_file_size)
+                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', quality=webp_quality))
+                save_format = 'WEBP'
+                compression_info = f"lossy (quality {webp_quality})"
+            except Exception as e:
+                print(f"WebP lossy save failed: {str(e)}")
+                output_buffer.seek(0)
+                output_buffer.truncate(0)
 
         save_time = time.time() - start_time - upscale_time
-        print(f"Image saved in {save_time:.2f} seconds")
+        file_size = output_buffer.tell() / (1024 * 1024)  # Convert to MB
+        log_message = f"Image saved in {save_time:.2f} seconds as {save_format}"
+        if compression_info:
+            log_message += f" with {compression_info}"
+        log_message += f", size: {file_size:.2f} MB"
+        print(log_message)
 
         output_buffer.seek(0)
 
@@ -494,8 +533,14 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
                 message = f"<@{ctx.author.id}> Here's your image upscaled with `{model_name}`"
                 if has_alpha:
                     message += f" and alpha method `{alpha_handling}`"
-                message += ":"
+                if compression_info:
+                    message += f"\nNote: The image was saved as {save_format} with {compression_info} due to size limitations."
                 await ctx.send(message, file=discord.File(fp=output_buffer, filename=new_filename))
+        except discord.errors.HTTPException as e:
+            if e.code == 40005:  # Payload Too Large
+                await ctx.send(f"<@{ctx.author.id}> The upscaled image is too large to upload, even after compression. You may need to upscale a smaller image or use a model with a lower upscaling factor.")
+            else:
+                raise
         except asyncio.TimeoutError:
             print(f"Error: Image upload took too long and was cancelled.")
             await ctx.send("Error: Image upload took too long and was cancelled.")
@@ -532,7 +577,6 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
                 await msg.delete()
             except discord.errors.NotFound:
                 pass  # Message was already deleted, ignore the error
-
 
 # Cleanup task
 async def cleanup_models():
