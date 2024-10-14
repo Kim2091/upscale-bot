@@ -492,7 +492,7 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
         output_buffer = io.BytesIO()
         save_format = 'WEBP (lossless)'
         new_filename = f"{filename_parts[0]}_upscaled.webp"
-        max_file_size = 25 * 1024 * 1024  # 25 MB in bytes
+        max_file_size = 10 * 1024 * 1024  # 10 MB in bytes
         compression_info = None
 
         try:
@@ -516,6 +516,17 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
                 print(f"WebP lossy save failed: {str(e)}")
                 output_buffer.seek(0)
                 output_buffer.truncate(0)
+                
+                try:
+                    # If WebP fails, try JPEG with quality adjustment
+                    jpeg_quality = await loop.run_in_executor(thread_pool, find_webp_quality, result.convert('RGB'), max_file_size)
+                    await loop.run_in_executor(thread_pool, lambda: result.convert('RGB').save(output_buffer, 'JPEG', quality=jpeg_quality))
+                    save_format = 'JPEG'
+                    new_filename = f"{filename_parts[0]}_upscaled.jpg"
+                    compression_info = f"lossy (quality {jpeg_quality})"
+                except Exception as e:
+                    print(f"JPEG save failed: {str(e)}")
+                    raise Exception("Unable to compress image to under 10 MB")
 
         save_time = time.time() - start_time - upscale_time
         file_size = output_buffer.tell() / (1024 * 1024)  # Convert to MB
