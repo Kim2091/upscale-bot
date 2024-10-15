@@ -10,7 +10,9 @@ A Discord bot that performs image upscaling using various super-resolution model
 - Implements a customizable queuing system for handling multiple upscale requests
 - Automatically adjusts tile size based on available VRAM
 - Resize an image with typical scaling filters
-- Fuzzy name matching
+- Fuzzy model name matching
+- Alpha channel handling options: upscale, resize, or discard
+- Detailed image information retrieval
 
 ## Prerequisites
 
@@ -64,7 +66,11 @@ A Discord bot that performs image upscaling using various super-resolution model
      ```
      --resize <scale_factor> <method>
      ```
-
+   - To get detailed information about an image:
+     ```
+     --info
+     ```
+     Attach the image or provide an image URL when sending this command.
 ## Configuration
 
 You can adjust various settings in the `config.ini` file:
@@ -76,6 +82,8 @@ You can adjust various settings in the `config.ini` file:
 - `ThreadPoolWorkers`: Number of worker threads for processing
 - `MaxConcurrentUpscales`: Maximum number of concurrent upscale operations
 - `UpscaleTimeout` and `OtherStepTimeout`: Timeouts for upscaling and other operations
+- `UpscaleTimeout` and `OtherStepTimeout`: Timeouts for upscaling and other operations
+- `DefaultAlphaHandling`: Default method for handling alpha channels
 
 ## Security
 
@@ -87,3 +95,4 @@ You can adjust various settings in the `config.ini` file:
 - This bot uses the [Spandrel](https://github.com/chaiNNer-org/spandrel) library for loading and handling models.
 - Thanks to [@the-database](https://github.com/the-database) for the benchmarks contained in `vram_data.csv`
 - Thanks to the Discord.py team for their excellent Discord API wrapper.
+- The bot uses [Wand](https://docs.wand-py.org/) (ImageMagick) for additional image processing capabilities.
