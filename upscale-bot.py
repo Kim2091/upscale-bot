@@ -357,7 +357,7 @@ Use `--models` to see available models. """
         if selection_msg:
             await selection_msg.delete()
         
-@bot.command()
+@bot.command(aliases=['scale'])
 async def resize(ctx, *args):
     await resize_command(ctx, args, download_image, GAMMA_CORRECTION)
 
