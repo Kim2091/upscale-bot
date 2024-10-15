@@ -25,6 +25,7 @@ from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram, vra
 from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.alpha_handler import handle_alpha
 from utils.resize_module import resize_image, resize_command
+from utils.image_info import get_image_info, format_image_info
 
 # Install extra architectures
 spandrel_extra_arches.install()
@@ -198,6 +199,7 @@ async def on_ready():
 @bot.command()
 async def upscale(ctx, *args):
     status_msg = None
+    selection_msg = None
     try:
         step_logger.log_step("Initializing upscale command")
         
@@ -276,7 +278,6 @@ Use `--models` to see available models. """
                         reply = await bot.wait_for('message', check=check, timeout=30.0)
                         if reply.content.lower() == 'cancel':
                             await ctx.send("Upscale operation cancelled.")
-                            await selection_msg.delete()
                             return
                         selection = int(reply.content)
                         if 1 <= selection <= len(closest_matches):
@@ -284,11 +285,9 @@ Use `--models` to see available models. """
                             await ctx.send(f"Selected model: {model_name}")
                         else:
                             await ctx.send("Invalid selection. Upscale operation cancelled.")
-                            await selection_msg.delete()
                             return
                     except asyncio.TimeoutError:
                         await ctx.send("Selection timed out. Upscale operation cancelled.")
-                        await selection_msg.delete()
                         return
             else:
                 await ctx.send(f"Model '{model_name}' not found and no close matches. Use --models to see available models.")
@@ -397,6 +396,44 @@ async def list_models(ctx, search_term: str = None):
     if len(model_chunks) > 1:
         await ctx.send(f"Total number of available models: {len(available_models)}")
 
+@bot.command()
+async def info(ctx, *args):
+    try:
+        # Check if an image is attached
+        if ctx.message.attachments:
+            attachment = ctx.message.attachments[0]
+            # Download the attachment
+            await attachment.save(attachment.filename)
+            file_path = attachment.filename
+        elif args:
+            # If no attachment, check if a URL was provided
+            image_url = args[0]
+            file_path = 'temp_image'
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url) as resp:
+                    if resp.status == 200:
+                        with open(file_path, 'wb') as f:
+                            f.write(await resp.read())
+                    else:
+                        await ctx.send("Failed to download the image.")
+                        return
+        else:
+            await ctx.send("Please attach an image or provide an image URL.")
+            return
+
+        # Get and format the image info
+        image_info = get_image_info(file_path)
+        formatted_info = format_image_info(image_info)
+
+        # Send the formatted info
+        await ctx.send(f"```\n{formatted_info}\n```")
+
+    except Exception as e:
+        await ctx.send(f"An error occurred: {str(e)}")
+    finally:
+        # Clean up the temporary file if it was created
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)
 
 # Queue processing
 async def process_upscale_queue():
