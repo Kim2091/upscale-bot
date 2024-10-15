@@ -513,6 +513,21 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             await process_downscale(ctx, args, result, scale_factor, 'lanczos', GAMMA_CORRECTION)
             return
 
+        def estimate_file_size(img, format, **params):
+            temp_buffer = io.BytesIO()
+            img.save(temp_buffer, format=format, **params)
+            return temp_buffer.tell()
+        def find_webp_quality(img, max_size):
+            low, high = 1, 100
+            while low <= high:
+                mid = (low + high) // 2
+                size = estimate_file_size(img, 'WEBP', quality=mid)
+                if size < max_size:
+                    low = mid + 1
+                else:
+                    high = mid - 1
+            return high
+
         step_logger.log_step("Saving upscaled image")
         await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing...")
         output_buffer = io.BytesIO()
@@ -524,35 +539,38 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         compression_start_time = time.time()
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
-                # Try WebP lossless first
-                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', lossless=True))
+                # Try PNG first
+                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'PNG'))
                 if output_buffer.tell() > max_file_size:
-                    raise Exception("WebP lossless file size too large")
+                    raise Exception("PNG file size too large")
+                save_format = 'PNG'
+                new_filename = f"{filename_parts[0]}_upscaled.png"
         except Exception as e:
-            print(f"WebP lossless save failed: {str(e)}")
+            print(f"PNG save failed: {str(e)}")
             output_buffer.seek(0)
             output_buffer.truncate(0)
             
             try:
-                # Try WebP lossy with quality adjustment
-                webp_quality = await loop.run_in_executor(thread_pool, find_webp_quality, result, max_file_size)
-                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', quality=webp_quality))
-                save_format = 'WEBP'
-                compression_info = f"lossy (quality {webp_quality})"
+                # Try WebP lossless
+                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', lossless=True))
+                if output_buffer.tell() > max_file_size:
+                    raise Exception("WebP lossless file size too large")
+                save_format = 'WEBP (lossless)'
+                new_filename = f"{filename_parts[0]}_upscaled.webp"
             except Exception as e:
-                print(f"WebP lossy save failed: {str(e)}")
+                print(f"WebP lossless save failed: {str(e)}")
                 output_buffer.seek(0)
                 output_buffer.truncate(0)
                 
                 try:
-                    # If WebP fails, try JPEG with quality adjustment
-                    jpeg_quality = await loop.run_in_executor(thread_pool, find_webp_quality, result.convert('RGB'), max_file_size)
-                    await loop.run_in_executor(thread_pool, lambda: result.convert('RGB').save(output_buffer, 'JPEG', quality=jpeg_quality))
-                    save_format = 'JPEG'
-                    new_filename = f"{filename_parts[0]}_upscaled.jpg"
-                    compression_info = f"lossy (quality {jpeg_quality})"
+                    # Try WebP lossy
+                    webp_quality = await loop.run_in_executor(thread_pool, find_webp_quality, result, max_file_size)
+                    await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', quality=webp_quality))
+                    save_format = 'WEBP'
+                    new_filename = f"{filename_parts[0]}_upscaled.webp"
+                    compression_info = f"lossy (quality {webp_quality})"
                 except Exception as e:
-                    print(f"JPEG save failed: {str(e)}")
+                    print(f"WebP lossy save failed: {str(e)}")
                     raise Exception("Unable to compress image to under 10 MB")
 
         compression_time = time.time() - compression_start_time
