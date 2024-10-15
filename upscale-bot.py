@@ -616,6 +616,11 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         print(f"Image uploaded in {upload_time:.2f} seconds")
         print(f"Total processing time: {total_time:.2f} seconds")
 
+    except torch.cuda.OutOfMemoryError as e:
+        error_message = f"CUDA out of memory error occurred. Please try a smaller image or a different model."
+        await status_msg.edit(content=error_message)
+        print(f"CUDA out of memory error in upscale processing:")
+        traceback.print_exc()
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error processing upscale! {sanitize_error_message(str(e))}"
         await status_msg.edit(content=error_message)
