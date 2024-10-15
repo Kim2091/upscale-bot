@@ -46,7 +46,10 @@ def estimate_vram_and_tile_size(model, input_size, vram_data):
     size_factor = (input_size[0] * input_size[1]) / base_size
     
     # Model-specific adjustments
-    if 'atd' in model_name:
+    if 'esrgan' in model_name:
+        vram_scale_factor = 1.25  # More conservative for ESRGAN
+        size_exponent = 1.0  # Linear scaling for ESRGAN
+    elif 'atd' in model_name:
         vram_scale_factor = 1.4  # More conservative for ATD
         size_exponent = 0.95  # Closer to linear scaling
     elif 'dat' in model_name:
