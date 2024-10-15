@@ -186,7 +186,14 @@ async def resize_command(ctx, args, download_image, GAMMA_CORRECTION):
             await ctx.send("Please either attach an image or provide a valid image URL.")
             return
 
-        await process_resize(ctx, image, scale_factor, method, GAMMA_CORRECTION)
+        # Send a status message
+        status_msg = await ctx.send("Resizing image...")
+
+        try:
+            await process_resize(ctx, image, scale_factor, method, GAMMA_CORRECTION)
+        finally:
+            # Delete the status message
+            await status_msg.delete()
 
     except Exception as e:
         await ctx.send(f"Error in resize command: {str(e)}")
