@@ -197,9 +197,7 @@ async def on_ready():
 # Bot commands
 @bot.command()
 async def upscale(ctx, *args):
-    selection_msg = None
-    confirmation_msg = None
-    queue_msg = None
+    status_msg = None
     try:
         step_logger.log_step("Initializing upscale command")
         
@@ -222,8 +220,6 @@ Available commands:
 
 Use `--models` to see available models. """
 
-        step_logger.log_step("Initializing upscale command")
-        
         # Parse arguments
         model_name = None
         image_url = None
@@ -280,16 +276,19 @@ Use `--models` to see available models. """
                         reply = await bot.wait_for('message', check=check, timeout=30.0)
                         if reply.content.lower() == 'cancel':
                             await ctx.send("Upscale operation cancelled.")
+                            await selection_msg.delete()
                             return
                         selection = int(reply.content)
                         if 1 <= selection <= len(closest_matches):
                             model_name = closest_matches[selection-1][0]
-                            confirmation_msg = await ctx.send(f"Selected model: {model_name}")
+                            await ctx.send(f"Selected model: {model_name}")
                         else:
                             await ctx.send("Invalid selection. Upscale operation cancelled.")
+                            await selection_msg.delete()
                             return
                     except asyncio.TimeoutError:
                         await ctx.send("Selection timed out. Upscale operation cancelled.")
+                        await selection_msg.delete()
                         return
             else:
                 await ctx.send(f"Model '{model_name}' not found and no close matches. Use --models to see available models.")
@@ -344,14 +343,10 @@ Use `--models` to see available models. """
         has_alpha = image.mode in ('RGBA', 'LA') or (image.mode == 'P' and 'transparency' in image.info)
 
         # Queue the upscale operation
-        if queue_msg is None:  # Ensure we only queue once
-            if has_alpha:
-                queue_msg = await ctx.send(f"Your upscale request has been queued. Alpha handling: {alpha_handling}")
-            else:
-                queue_msg = await ctx.send(f"Your upscale request has been queued.")
-            
-            # Add the task to the queue
-            await upscale_queue.put(process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha))
+        status_msg = await ctx.send("Your upscale request has been queued.")
+        
+        # Add the task to the queue
+        await upscale_queue.put(process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha))
 
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error! {sanitize_error_message(str(e))}"
@@ -359,12 +354,10 @@ Use `--models` to see available models. """
         print(f"Error in upscale command:")
         traceback.print_exc()
     finally:
-        # Clean up messages
+        # Ensure we clean up the selection message if it exists
         if selection_msg:
             await selection_msg.delete()
-        if confirmation_msg:
-            await confirmation_msg.delete()
-
+        
 @bot.command()
 async def resize(ctx, *args):
     await resize_command(ctx, args, download_image, GAMMA_CORRECTION)
@@ -415,12 +408,10 @@ async def process_upscale_queue():
         finally:
             upscale_queue.task_done()
 
-async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has_alpha):
+async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha):
     monitor_task = None
-    status_messages = [queue_msg]  # Start with the queue message
     try:
-        processing_msg = await ctx.send("Processing your image. This may take a while...")
-        status_messages.append(processing_msg)
+        await status_msg.edit(content="Processing your image. This may take a while...")
 
         step_logger.log_step("Preparing model and estimating VRAM usage")
         model = load_model(model_name)
@@ -440,29 +431,42 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
         # Create the new filename with "_upscaled" appended
         filename_parts = os.path.splitext(original_filename)
 
+        status_content = (
+            f"Processing image from {image_source}\n"
+            f"Model: {model_name}\n"
+            f"Architecture: {model.architecture.name}"
+        )
+        # Only include alpha handling info if the image has an alpha channel
+        if has_alpha:
+            status_content += f"\nAlpha handling: {alpha_handling}"
+        
+        await status_msg.edit(content=status_content)
+
         print(f"Starting upscale of image from {image_source}")
         print(f"Model: {model_name}")
         print(f"Architecture: {model.architecture.name}")
         print(f"Input size: {input_size}")
         print(f"Estimated VRAM usage: {estimated_vram:.2f} GB")
         print(f"Adjusted tile size: {adjusted_tile_size}")
-        print(f"Alpha handling: {alpha_handling}")
+        if has_alpha:
+            print(f"Alpha handling: {alpha_handling}")
 
         start_time = time.time()
 
         monitor_task = asyncio.create_task(step_logger.monitor_progress())
 
         step_logger.log_step("Upscaling image")
+        await status_msg.edit(content=f"{status_content}\nUpscaling...")
         loop = asyncio.get_event_loop()
         try:
             async with asyncio.timeout(UPSCALE_TIMEOUT):
                 result = await loop.run_in_executor(thread_pool, upscale_image, image, model, adjusted_tile_size, alpha_handling, has_alpha)
         except asyncio.TimeoutError:
-            print(f"Error: Image processing took too long and was cancelled.")
-            await ctx.send("Error: Image processing took too long and was cancelled.")
+            await status_msg.edit(content="Error: Image processing took too long and was cancelled.")
             return
 
         upscale_time = time.time() - start_time
+        await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds")
         print(f"Upscale completed in {upscale_time:.2f} seconds")
 
         # Add downscaling option within upscale result
@@ -472,29 +476,15 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
             await process_downscale(ctx, args, result, scale_factor, 'lanczos', GAMMA_CORRECTION)
             return
 
-        def estimate_file_size(img, format, **params):
-            temp_buffer = io.BytesIO()
-            img.save(temp_buffer, format=format, **params)
-            return temp_buffer.tell()
-
-        def find_webp_quality(img, max_size):
-            low, high = 1, 100
-            while low <= high:
-                mid = (low + high) // 2
-                size = estimate_file_size(img, 'WEBP', quality=mid)
-                if size < max_size:
-                    low = mid + 1
-                else:
-                    high = mid - 1
-            return high
-
         step_logger.log_step("Saving upscaled image")
+        await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing...")
         output_buffer = io.BytesIO()
         save_format = 'WEBP (lossless)'
         new_filename = f"{filename_parts[0]}_upscaled.webp"
         max_file_size = 10 * 1024 * 1024  # 10 MB in bytes
         compression_info = None
 
+        compression_start_time = time.time()
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                 # Try WebP lossless first
@@ -528,13 +518,15 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
                     print(f"JPEG save failed: {str(e)}")
                     raise Exception("Unable to compress image to under 10 MB")
 
-        save_time = time.time() - start_time - upscale_time
+        compression_time = time.time() - compression_start_time
         file_size = output_buffer.tell() / (1024 * 1024)  # Convert to MB
-        log_message = f"Image saved in {save_time:.2f} seconds as {save_format}"
+        log_message = f"Image saved in {compression_time:.2f} seconds as {save_format}"
         if compression_info:
             log_message += f" with {compression_info}"
         log_message += f", size: {file_size:.2f} MB"
         print(log_message)
+
+        await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing completed in {compression_time:.2f} seconds\nUploading...")
 
         output_buffer.seek(0)
 
@@ -547,31 +539,31 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
                 if compression_info:
                     message += f"\nNote: The image was saved as {save_format} with {compression_info} due to size limitations."
                 await ctx.send(message, file=discord.File(fp=output_buffer, filename=new_filename))
+                
+                # Update status message with final information
+                final_status = f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing completed in {compression_time:.2f} seconds\nUpload successful!"
+                await status_msg.edit(content=final_status)
+                
+                # Wait for 5 seconds before deleting the status message
+                await asyncio.sleep(5)
+                await status_msg.delete()
         except discord.errors.HTTPException as e:
             if e.code == 40005:  # Payload Too Large
-                await ctx.send(f"<@{ctx.author.id}> The upscaled image is too large to upload, even after compression. You may need to upscale a smaller image or use a model with a lower upscaling factor.")
+                await status_msg.edit(content=f"<@{ctx.author.id}> The upscaled image is too large to upload, even after compression. You may need to upscale a smaller image or use a model with a lower upscaling factor.")
             else:
                 raise
         except asyncio.TimeoutError:
-            print(f"Error: Image upload took too long and was cancelled.")
-            await ctx.send("Error: Image upload took too long and was cancelled.")
+            await status_msg.edit(content="Error: Image upload took too long and was cancelled.")
             return
 
-        upload_time = time.time() - start_time - upscale_time - save_time
+        upload_time = time.time() - start_time - upscale_time - compression_time
         total_time = time.time() - start_time
         print(f"Image uploaded in {upload_time:.2f} seconds")
         print(f"Total processing time: {total_time:.2f} seconds")
 
-        # Delete status messages after successful upscale
-        for msg in status_messages:
-            try:
-                await msg.delete()
-            except discord.errors.NotFound:
-                pass  # Message was already deleted, ignore the error
-
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error processing upscale! {sanitize_error_message(str(e))}"
-        await ctx.send(error_message)
+        await status_msg.edit(content=error_message)
         print(f"Error in upscale processing:")
         traceback.print_exc()
     finally:
@@ -581,13 +573,6 @@ async def process_upscale(ctx, model_name, image, queue_msg, alpha_handling, has
         torch.cuda.empty_cache()
         gc.collect()
         print("Upscale cleanup completed, returned to idle state.")
-
-        # Delete status messages after successful upscale
-        for msg in status_messages:
-            try:
-                await msg.delete()
-            except discord.errors.NotFound:
-                pass  # Message was already deleted, ignore the error
 
 # Cleanup task
 async def cleanup_models():
