@@ -8,6 +8,9 @@ import asyncio
 import traceback
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
+import threading
+import concurrent.futures
+from functools import partial
 
 # Third-party library imports
 import torch
@@ -142,44 +145,44 @@ async def download_image(url):
             except Exception as e:
                 return None, f"Error processing the image: {str(e)}"
 
-def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
+def upscale_image(image, model, tile_size, alpha_handling, has_alpha, precision, check_cancelled):
     def upscale_func(img):
         img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).cuda()
-
         _, _, h, w = img_tensor.shape
         output_h, output_w = h * model.scale, w * model.scale
-
         step_logger.log_step("Processing image in tiles")
-
-        # Determine the output dtype based on model capabilities and PRECISION setting
+        
+        # Determine the output dtype and inference mode based on model capabilities and PRECISION setting
         if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
             output_dtype = torch.bfloat16
+            autocast_dtype = torch.bfloat16
         elif model.supports_half and PRECISION in ['auto', 'fp16']:
             output_dtype = torch.float16
+            autocast_dtype = torch.float16
         else:
             output_dtype = torch.float32
+            autocast_dtype = None
+
+        print(f"Using precision mode: {autocast_dtype}")
 
         output_tensor = torch.zeros((1, img_tensor.shape[1], output_h, output_w), dtype=output_dtype, device='cuda')
-
+        
         for y in range(0, h, tile_size):
             for x in range(0, w, tile_size):
                 step_logger.log_step(f"Processing tile at ({x}, {y})")
+                if check_cancelled():
+                    raise asyncio.CancelledError("Upscale operation was cancelled")
+               
                 tile = img_tensor[:, :, y:min(y+tile_size, h), x:min(x+tile_size, w)]
-
                 with torch.inference_mode():
-                    if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
-                        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                            upscaled_tile = model(tile)
-                    elif model.supports_half and PRECISION in ['auto', 'fp16']:
-                        with torch.autocast(device_type='cuda', dtype=torch.float16):
+                    if autocast_dtype:
+                        with torch.autocast(device_type='cuda', dtype=autocast_dtype):
                             upscaled_tile = model(tile)
                     else:
                         upscaled_tile = model(tile)
-
                 output_tensor[:, :, y*model.scale:min((y+tile_size)*model.scale, output_h),
                               x*model.scale:min((x+tile_size)*model.scale, output_w)].copy_(upscaled_tile)
-
-        step_logger.log_step("Converting output tensor to PIL Image")
+        
         return Image.fromarray((output_tensor[0].permute(1, 2, 0).cpu().float().numpy() * 255).astype(np.uint8))
 
     # Use the alpha_handler to process the image if it has an alpha channel
@@ -187,7 +190,6 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha):
         return handle_alpha(image, upscale_func, alpha_handling, GAMMA_CORRECTION)
     else:
         return upscale_func(image)
-
 # Bot event handlers
 @bot.event
 async def on_ready():
@@ -446,7 +448,6 @@ async def process_upscale_queue():
             upscale_queue.task_done()
 
 async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha):
-    monitor_task = None
     try:
         await status_msg.edit(content="Processing your image. This may take a while...")
 
@@ -461,11 +462,9 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             original_filename = ctx.message.attachments[0].filename
             image_source = f"attachment: {original_filename}"
         else:
-            # If it's a URL, use a default filename
             original_filename = "image.png"
             image_source = "provided URL"
 
-        # Create the new filename with "_upscaled" appended
         filename_parts = os.path.splitext(original_filename)
 
         status_content = (
@@ -473,7 +472,6 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             f"Model: {model_name}\n"
             f"Architecture: {model.architecture.name}"
         )
-        # Only include alpha handling info if the image has an alpha channel
         if has_alpha:
             status_content += f"\nAlpha handling: {alpha_handling}"
         
@@ -490,16 +488,40 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
 
         start_time = time.time()
 
-        monitor_task = asyncio.create_task(step_logger.monitor_progress())
-
         step_logger.log_step("Upscaling image")
         await status_msg.edit(content=f"{status_content}\nUpscaling...")
-        loop = asyncio.get_event_loop()
+
+        # Create a cancellation event
+        cancel_event = asyncio.Event()
+
+        # Create the upscale function
+        def upscale_func():
+            def check_cancelled():
+                return cancel_event.is_set()
+            
+            if check_cancelled():
+                raise asyncio.CancelledError("Upscale cancelled")
+            return upscale_image(image, model, adjusted_tile_size, alpha_handling, has_alpha, PRECISION, check_cancelled)
+
+
+        # Run the upscale function in a separate thread
+        upscale_task = asyncio.create_task(asyncio.to_thread(upscale_func))
+
+        # Wait for the upscale task to complete or timeout
         try:
-            async with asyncio.timeout(UPSCALE_TIMEOUT):
-                result = await loop.run_in_executor(thread_pool, upscale_image, image, model, adjusted_tile_size, alpha_handling, has_alpha)
+            result = await asyncio.wait_for(upscale_task, timeout=UPSCALE_TIMEOUT)
         except asyncio.TimeoutError:
+            cancel_event.set()
+            print("Upscale operation timed out and was cancelled.")
             await status_msg.edit(content="Error: Image processing took too long and was cancelled.")
+            try:
+                await upscale_task
+            except asyncio.CancelledError:
+                print("Upscale task was successfully cancelled after timeout.")
+            return
+        except asyncio.CancelledError:
+            print("Upscale operation was cancelled.")
+            await status_msg.edit(content="Error: Image processing was cancelled.")
             return
 
         upscale_time = time.time() - start_time
@@ -540,7 +562,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                 # Try PNG first
-                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'PNG'))
+                await asyncio.to_thread(lambda: result.save(output_buffer, 'PNG'))
                 if output_buffer.tell() > max_file_size:
                     raise Exception("PNG file size too large")
                 save_format = 'PNG'
@@ -552,7 +574,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             
             try:
                 # Try WebP lossless
-                await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', lossless=True))
+                await asyncio.to_thread(lambda: result.save(output_buffer, 'WEBP', lossless=True))
                 if output_buffer.tell() > max_file_size:
                     raise Exception("WebP lossless file size too large")
                 save_format = 'WEBP (lossless)'
@@ -564,8 +586,8 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                 
                 try:
                     # Try WebP lossy
-                    webp_quality = await loop.run_in_executor(thread_pool, find_webp_quality, result, max_file_size)
-                    await loop.run_in_executor(thread_pool, lambda: result.save(output_buffer, 'WEBP', quality=webp_quality))
+                    webp_quality = await asyncio.to_thread(find_webp_quality, result, max_file_size)
+                    await asyncio.to_thread(lambda: result.save(output_buffer, 'WEBP', quality=webp_quality))
                     save_format = 'WEBP'
                     new_filename = f"{filename_parts[0]}_upscaled.webp"
                     compression_info = f"lossy (quality {webp_quality})"
@@ -595,11 +617,9 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                     message += f"\nNote: The image was saved as {save_format} with {compression_info} due to size limitations."
                 await ctx.send(message, file=discord.File(fp=output_buffer, filename=new_filename))
                 
-                # Update status message with final information
                 final_status = f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing completed in {compression_time:.2f} seconds\nUpload successful!"
                 await status_msg.edit(content=final_status)
                 
-                # Wait for 5 seconds before deleting the status message
                 await asyncio.sleep(5)
                 await status_msg.delete()
         except discord.errors.HTTPException as e:
@@ -618,18 +638,14 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
 
     except torch.cuda.OutOfMemoryError as e:
         error_message = f"CUDA out of memory error occurred. Please try a smaller image or a different model."
+        print(f"CUDA out of memory error in upscale processing: {str(e)}")
         await status_msg.edit(content=error_message)
-        print(f"CUDA out of memory error in upscale processing:")
-        traceback.print_exc()
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error processing upscale! {sanitize_error_message(str(e))}"
+        print(f"Error in upscale processing: {str(e)}")
         await status_msg.edit(content=error_message)
-        print(f"Error in upscale processing:")
         traceback.print_exc()
     finally:
-        if monitor_task:
-            monitor_task.cancel()
-        step_logger.log_step("Idle")
         torch.cuda.empty_cache()
         gc.collect()
         print("Upscale cleanup completed, returned to idle state.")
