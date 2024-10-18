@@ -95,6 +95,6 @@ You can adjust various settings in the `config.ini` file:
 ## Acknowledgements
 
 - This bot uses the [Spandrel](https://github.com/chaiNNer-org/spandrel) library for loading and handling models.
-- Thanks to [@the-database](https://github.com/the-database) for the benchmarks contained in `vram_data.csv`
+- Thanks to [@the-database](https://github.com/the-database) for the benchmarks contained in `vram_data_bffp16.md` & `vram_data_fp32.md`
 - Thanks to the Discord.py team for their excellent Discord API wrapper.
 - The bot uses [Wand](https://docs.wand-py.org/) (ImageMagick) for additional image processing capabilities.
