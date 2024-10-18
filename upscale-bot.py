@@ -437,7 +437,6 @@ async def info(ctx, *args):
         if 'file_path' in locals() and os.path.exists(file_path):
             os.remove(file_path)
 
-# Queue processing
 async def process_upscale_queue():
     while True:
         upscale_task = await upscale_queue.get()
@@ -445,6 +444,10 @@ async def process_upscale_queue():
             async with upscale_semaphore:
                 await upscale_task
         finally:
+            # Clear CUDA cache and perform garbage collection after each upscale task
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("CUDA cache cleared and garbage collected after upscale task.")
             upscale_queue.task_done()
 
 async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha):
