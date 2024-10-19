@@ -232,6 +232,7 @@ Available commands:
 `--upscale <model_name> [alpha_handling] [image_url]` - Upscale an image using the specified model
 `--models` - List all available upscaling models
 `--resize <scale_factor> <method>` - Allows you to resize images up or down using normal scaling methods (e.g. bicubic, lanczos)
+`--info` - Allows you to view the details of a given image. Useful for DDS images to view the compression type
 
 Use `--models` to see available models. """
 
