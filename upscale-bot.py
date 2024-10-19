@@ -24,7 +24,7 @@ import spandrel
 import spandrel_extra_arches
 
 # Local module imports
-from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram, vram_data
+from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram
 from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.alpha_handler import handle_alpha
 from utils.resize_module import resize_image, resize_command
@@ -84,6 +84,16 @@ class StepLogger:
                 print(f"Still working on: {self.current_step} (Elapsed time: {elapsed_time:.2f}s)")
 
 step_logger = StepLogger()
+
+@bot.event
+async def on_message(message):
+    if isinstance(message.channel, discord.DMChannel):
+        try:
+            await message.author.send("Sorry, this bot only works in servers, not in DMs.")
+        except discord.HTTPException:
+            pass  # If we can't send DMs to the user
+    else:
+        await bot.process_commands(message)
 
 # Sanitize error messages
 def sanitize_error_message(error_message):
@@ -194,8 +204,9 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha, precision,
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
+    print("Note: This bot is configured to work only in servers, not in DMs.")
     bot.loop.create_task(process_upscale_queue())
-    bot.loop.create_task(cleanup_models())  # Start the periodic cleanup task
+    bot.loop.create_task(cleanup_models())
 
 # Bot commands
 @bot.command()
@@ -458,7 +469,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         model = load_model(model_name)
 
         input_size = (image.width, image.height)
-        estimated_vram, adjusted_tile_size = estimate_vram_and_tile_size(model, input_size, vram_data)
+        estimated_vram, adjusted_tile_size = estimate_vram_and_tile_size(model, input_size)
 
         # Get the original filename
         if ctx.message.attachments:
@@ -652,6 +663,8 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         torch.cuda.empty_cache()
         gc.collect()
         print("Upscale cleanup completed, returned to idle state.")
+
+
 
 # Cleanup task
 async def cleanup_models():
