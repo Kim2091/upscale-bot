@@ -15,11 +15,11 @@ DEFAULT_TILE_SIZE = int(config['Processing'].get('DefaultTileSize', '384'))
 MAX_TILE_SIZE = int(config['Processing'].get('MaxTileSize', '512'))
 PRECISION = config['Processing'].get('Precision', 'auto').lower()
 
-def load_vram_data(csv_file):
+def load_vram_data(markdown_file):
     vram_data = {}
     current_scale = None
 
-    with open(csv_file, 'r') as f:
+    with open(markdown_file, 'r') as f:
         content = f.read()
 
     for line in content.split('\n'):
@@ -87,7 +87,7 @@ def get_free_vram():
         print(f"Error parsing nvidia-smi output: {e}")
         return 0
 
-def estimate_vram_and_tile_size(model, input_size, vram_data):
+def estimate_vram_and_tile_size(model, input_size):
     model_name = model.architecture.name.lower()
     
     # Load the appropriate VRAM data based on precision
@@ -152,8 +152,3 @@ def estimate_vram_and_tile_size(model, input_size, vram_data):
     print(f"Calculated tile size: {tile_size}")
 
     return estimated_vram, tile_size
-
-# Load VRAM data at module level
-csv_file = os.path.join(os.path.dirname(__file__), 'vram_data.csv')
-vram_data = load_vram_data(csv_file)
-        
