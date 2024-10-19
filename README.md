@@ -85,7 +85,6 @@ You can adjust various settings in the `config.ini` file:
 - `ThreadPoolWorkers`: Number of worker threads for processing
 - `MaxConcurrentUpscales`: Maximum number of concurrent upscale operations
 - `UpscaleTimeout` and `OtherStepTimeout`: Timeouts for upscaling and other operations
-- `UpscaleTimeout` and `OtherStepTimeout`: Timeouts for upscaling and other operations
 - `DefaultAlphaHandling`: Default method for handling alpha channels
 
 ## Security
