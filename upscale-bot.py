@@ -1,34 +1,36 @@
 # Standard library imports
-import os
-import io
-import gc
-import re
-import time
 import asyncio
-import traceback
-from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor
-import threading
 import concurrent.futures
+import configparser
+import gc
+import io
+import os
+import re
+import signal
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from io import BytesIO
 
 # Third-party library imports
-import torch
-import numpy as np
 import aiohttp
 import discord
-from discord.ext import commands
-import configparser
+import numpy as np
+import torch
 from PIL import Image, UnidentifiedImageError
+from discord.ext import commands
 import spandrel
 import spandrel_extra_arches
 
 # Local module imports
-from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram
-from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.alpha_handler import handle_alpha
-from utils.resize_module import resize_image, resize_command
+from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.image_info import get_image_info, format_image_info
+from utils.resize_module import resize_command, resize_image
+from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram
+
 
 # Install extra architectures
 spandrel_extra_arches.install()
@@ -85,15 +87,47 @@ class StepLogger:
 
 step_logger = StepLogger()
 
+@bot.command(name='restart')
+async def restart_bot(ctx):
+    """Admin command to restart the bot."""
+    if str(ctx.author.id) != ADMIN_ID:
+        await ctx.send("You do not have permission to use this command.", delete_after=5)
+        return
+
+    restart_message = await ctx.send("Restarting bot...")
+    try:
+        # Delay to allow the message to be deleted
+        await asyncio.sleep(2)
+        await restart_message.delete()
+
+        # Clean up before restarting
+        await bot.close()
+
+        # Use os.execv to restart the process
+        import os
+        import sys
+        os.execv(sys.executable, ['python'] + sys.argv)
+    except Exception as e:
+        error_message = f"Failed to restart bot. Details: {type(e).__name__}: {e}"
+        print(error_message)
+        await ctx.send(f"Error: {error_message}")
+
+
 @bot.event
 async def on_message(message):
+    print(f"on_message triggered for: {message.content}")  # Debug log
+    if message.author == bot.user:
+        return
+
     if isinstance(message.channel, discord.DMChannel):
         try:
             await message.author.send("Sorry, this bot only works in servers, not in DMs.")
         except discord.HTTPException:
-            pass  # If we can't send DMs to the user
-    else:
-        await bot.process_commands(message)
+            pass
+        return
+
+    await bot.process_commands(message)
+
 
 # Sanitize error messages
 def sanitize_error_message(error_message):
@@ -200,6 +234,7 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha, precision,
         return handle_alpha(image, upscale_func, alpha_handling, GAMMA_CORRECTION)
     else:
         return upscale_func(image)
+        
 # Bot event handlers
 @bot.event
 async def on_ready():
@@ -651,19 +686,24 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         print(f"Image uploaded in {upload_time:.2f} seconds")
         print(f"Total processing time: {total_time:.2f} seconds")
 
-    except torch.cuda.OutOfMemoryError as e:
-        error_message = f"CUDA out of memory error occurred. Please try a smaller image or a different model."
-        print(f"CUDA out of memory error in upscale processing: {str(e)}")
+    except (torch.cuda.OutOfMemoryError, torch.cuda.CudaError, RuntimeError) as e:
+        error_message = f"Critical CUDA error occurred. Restarting bot..."
+        print(error_message)
         await status_msg.edit(content=error_message)
-    except Exception as e:
-        error_message = f"<@{ADMIN_ID}> Error processing upscale! {sanitize_error_message(str(e))}"
-        print(f"Error in upscale processing: {str(e)}")
-        await status_msg.edit(content=error_message)
-        traceback.print_exc()
+        
+        try:
+            # Proper cleanup before restart
+            await bot.close()  # Ensure all tasks and handlers are closed
+            os.execv(sys.executable, ['python'] + sys.argv)  # Restart the process
+        except Exception as restart_error:
+            error_message = f"Failed to restart bot after CUDA error: {restart_error}"
+            print(error_message)
+            await status_msg.edit(content=f"<@{ADMIN_ID}> Restart failed. Details: {error_message}")
     finally:
         torch.cuda.empty_cache()
         gc.collect()
         print("Upscale cleanup completed, returned to idle state.")
+
 
 
 
