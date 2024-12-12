@@ -88,10 +88,10 @@ You can adjust various settings in the `config.ini` file:
 - `DefaultTileSize` and `MaxTileSize`: Control the tile size for processing large images
 - `MaxTotalPixels`: Maximum allowed input image size (width * height)
 - `VRAMSafetyMultiplier` and `AvailableVRAMUsageFraction`: Fine-tune VRAM usage
-- `ThreadPoolWorkers`: Number of worker threads for processing
 - `MaxConcurrentUpscales`: Maximum number of concurrent upscale operations
 - `UpscaleTimeout` and `OtherStepTimeout`: Timeouts for upscaling and other operations
 - `DefaultAlphaHandling`: Default method for handling alpha channels
+- `CleanupInterval`: Controls the rate of model cleanup
 
 ## Security
 
