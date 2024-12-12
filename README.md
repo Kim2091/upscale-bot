@@ -55,6 +55,11 @@ A Discord bot that performs image upscaling using various super-resolution model
 
 2. In a Discord channel where the bot is present, use the following commands:
 
+   - To view all commands:
+     ```
+     --help
+     ```
+
    - To upscale an image:
      ```
      --upscale <model_name>
@@ -74,6 +79,7 @@ A Discord bot that performs image upscaling using various super-resolution model
      --info
      ```
      Attach the image or provide an image URL when sending this command.
+     
 ## Configuration
 
 You can adjust various settings in the `config.ini` file:
@@ -82,10 +88,10 @@ You can adjust various settings in the `config.ini` file:
 - `DefaultTileSize` and `MaxTileSize`: Control the tile size for processing large images
 - `MaxTotalPixels`: Maximum allowed input image size (width * height)
 - `VRAMSafetyMultiplier` and `AvailableVRAMUsageFraction`: Fine-tune VRAM usage
-- `ThreadPoolWorkers`: Number of worker threads for processing
 - `MaxConcurrentUpscales`: Maximum number of concurrent upscale operations
 - `UpscaleTimeout` and `OtherStepTimeout`: Timeouts for upscaling and other operations
 - `DefaultAlphaHandling`: Default method for handling alpha channels
+- `CleanupInterval`: Controls the rate of model cleanup
 
 ## Security
 

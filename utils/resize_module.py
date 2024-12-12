@@ -4,8 +4,9 @@ import chainner_ext
 import numpy as np
 from PIL import Image
 from io import BytesIO
-import configparser
 from .config_reader import read_config
+import logging
+logger = logging.getLogger('UpscaleBot')
 
 # Read configuration
 config = read_config()
@@ -68,8 +69,8 @@ def resize_image(image, scale_factor, method='box', gamma_correction=True, ignor
     new_h = max(1, int(h * scale_factor))
     new_w = max(1, int(w * scale_factor))
     
-    print(f"Original size: {w}x{h}")
-    print(f"New size: {new_w}x{new_h}")
+    logger.info(f"Original size: {w}x{h}")
+    logger.info(f"New size: {new_w}x{new_h}")
     
     # Disable gamma correction for nearest neighbor
     if method.lower() == 'nearest':
@@ -101,16 +102,16 @@ async def process_resize(ctx, image, scale_factor, method, gamma_correction):
             await ctx.send(f"Unsupported method: {method}. Available methods are:\n{filter_list}")
             return
 
-        print(f"Original image size: {image.size}")
-        print(f"Original image mode: {image.mode}")
-        print(f"Scale factor: {scale_factor}")
-        print(f"Method: {method}")
+        logger.info(f"Original image size: {image.size}")
+        logger.info(f"Original image mode: {image.mode}")
+        logger.info(f"Scale factor: {scale_factor}")
+        logger.info(f"Method: {method}")
 
         # Perform resizing using chainner_ext via resize_image function
         resized_image = resize_image(image, scale_factor, method, gamma_correction)
 
-        print(f"Resized image size: {resized_image.size}")
-        print(f"Resized image mode: {resized_image.mode}")
+        logger.info(f"Resized image size: {resized_image.size}")
+        logger.info(f"Resized image mode: {resized_image.mode}")
 
         # Save and send the resized image
         output_buffer = BytesIO()
@@ -122,8 +123,8 @@ async def process_resize(ctx, image, scale_factor, method, gamma_correction):
                        file=discord.File(fp=output_buffer, filename="resized_image.png"))
 
     except Exception as e:
-        await ctx.send(f"Error in resize process: {str(e)}")
-        print(f"Error in resize process:")
+        logger.error(f"Error in resize process: {str(e)}")
+        logger.error(f"Error in resize process:")
         import traceback
         traceback.print_exc()
 
@@ -196,7 +197,7 @@ async def resize_command(ctx, args, download_image, GAMMA_CORRECTION):
             await status_msg.delete()
 
     except Exception as e:
-        await ctx.send(f"Error in resize command: {str(e)}")
-        print(f"Error in resize command:")
+        logger.error(f"Error in resize command: {str(e)}")
+        logger.error(f"Error in resize command:")
         import traceback
         traceback.print_exc()

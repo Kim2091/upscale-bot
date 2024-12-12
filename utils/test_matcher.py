@@ -1,4 +1,6 @@
 from fuzzy_model_matcher import search_models
+import logging
+logger = logging.getLogger('UpscaleBot')
 
 available_models = [
     "4xFireAlpha", "4xForest", "4xFuzzyBox", "4xGround", "4xGuilty", 
@@ -16,7 +18,7 @@ available_models = [
 test_queries = ["dejpg", "smooth", "minecraft", "4x", "pbrify", "dejpeg", "DeJpeg"]
 
 for query in test_queries:
-    print(f"\nSearching for: {query}")
+    logger.info(f"\nSearching for: {query}")
     results = search_models(query, available_models)
     for model, score, match_type in results:
-        print(f"  {model} (score: {score}, type: {match_type})")
+        logger.info(f"  {model} (score: {score}, type: {match_type})")
