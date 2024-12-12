@@ -3,6 +3,10 @@ from PIL import Image
 from .resize_module import resize_image
 
 def handle_alpha(image, upscale_func, alpha_handling, gamma_correction):
+    # Early return for 'discard' option to avoid unnecessary conversions
+    if alpha_handling == 'discard':
+        return upscale_func(image.convert('RGB'))
+
     # Convert image to RGB
     rgb_image, alpha = image.convert('RGB'), image.split()[3]
 
@@ -32,8 +36,6 @@ def handle_alpha(image, upscale_func, alpha_handling, gamma_correction):
             gamma_correction=gamma_correction,
             ignore_scale_limits=True
         )
-    elif alpha_handling == 'discard':
-        return upscaled_rgb
 
     # Merge upscaled RGB and alpha
     upscaled_rgba = upscaled_rgb.convert('RGBA')
