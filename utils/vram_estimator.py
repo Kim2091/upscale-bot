@@ -1,10 +1,8 @@
-import csv
 import os
-import torch
-import configparser
-import math
 from .config_reader import read_config
 import subprocess
+import logging
+logger = logging.getLogger('UpscaleBot')
 
 # Read configuration
 config = read_config()
@@ -42,7 +40,7 @@ def load_vram_data(markdown_file):
         try:
             vram = float(vram_str) if vram_str != '-' else None
         except ValueError:
-            print(f"Warning: Invalid VRAM value '{vram_str}' for model '{model_name}'. Using None.")
+            logger.warning(f"Warning: Invalid VRAM value '{vram_str}' for model '{model_name}'. Using None.")
             vram = None
         
         if model_name not in vram_data:
@@ -78,13 +76,13 @@ def get_free_vram():
                                 check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         output = result.stdout.strip()
         free_vram = int(output) / 1024  # Convert MiB to GiB
-        print(f"Available VRAM: {free_vram:.2f} GB")
+        logger.info(f"Available VRAM: {free_vram:.2f} GB")
         return free_vram
     except subprocess.CalledProcessError as e:
-        print(f"Error running nvidia-smi: {e}")
+        logger.error(f"Error running nvidia-smi: {e}")
         return 0
     except ValueError as e:
-        print(f"Error parsing nvidia-smi output: {e}")
+        logger.error(f"Error parsing nvidia-smi output: {e}")
         return 0
 
 def estimate_vram_and_tile_size(model, input_size):
@@ -100,7 +98,7 @@ def estimate_vram_and_tile_size(model, input_size):
     free_vram = get_free_vram()
     
     if matched_data is None or scale not in matched_data or matched_data[scale]["vram"] is None:
-        print(f"Warning: No matching VRAM data for {model_name} at scale {scale}. Using default values.")
+        logger.warning(f"Warning: No matching VRAM data for {model_name} at scale {scale}. Using default values.")
         return free_vram * AVAILABLE_VRAM_USAGE_FRACTION, DEFAULT_TILE_SIZE
 
     vram = matched_data[scale]["vram"]
@@ -143,12 +141,12 @@ def estimate_vram_and_tile_size(model, input_size):
     # Ensure tile size is even and within bounds
     tile_size = max(64, min(tile_size - (tile_size % 64), MAX_TILE_SIZE))
 
-    print(f"Model: {model_name}")
-    print(f"Scale: {scale}x")
-    print(f"Precision: {PRECISION}")
-    print(f"Estimated VRAM usage: {estimated_vram:.2f} GB")
-    print(f"Free VRAM: {free_vram:.2f} GB")
-    print(f"Safe VRAM usage: {safe_vram:.2f} GB")
-    print(f"Calculated tile size: {tile_size}")
+    logger.info(f"Model: {model_name}")
+    logger.info(f"Scale: {scale}x")
+    logger.info(f"Precision: {PRECISION}")
+    logger.info(f"Estimated VRAM usage: {estimated_vram:.2f} GB")
+    logger.info(f"Free VRAM: {free_vram:.2f} GB")
+    logger.info(f"Safe VRAM usage: {safe_vram:.2f} GB")
+    logger.info(f"Calculated tile size: {tile_size}")
 
     return estimated_vram, tile_size
