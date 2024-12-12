@@ -1,18 +1,15 @@
 # Standard library imports
 import asyncio
-import concurrent.futures
 import configparser
 import gc
 import io
+import sys
 import os
-import re
-import signal
-import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from io import BytesIO
+import logging
+from logging.handlers import RotatingFileHandler
 
 # Third-party library imports
 import aiohttp
@@ -28,9 +25,22 @@ import spandrel_extra_arches
 from utils.alpha_handler import handle_alpha
 from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.image_info import get_image_info, format_image_info
-from utils.resize_module import resize_command, resize_image
-from utils.vram_estimator import estimate_vram_and_tile_size, get_free_vram
+from utils.resize_module import resize_command
+from utils.vram_estimator import estimate_vram_and_tile_size
 
+# Setup logging
+log_formatter = logging.Formatter('\033[38;2;118;118;118m%(asctime)s\033[0m - \033[38;2;59;120;255m%(levelname)s\033[0m - %(message)s')
+log_handler = RotatingFileHandler('upscale_bot.log', maxBytes=10*1024*1024, backupCount=5)
+log_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))  # Plain format for file
+
+logger = logging.getLogger('UpscaleBot')
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
+
+# Add colored console output
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(log_formatter)
+logger.addHandler(console_handler)
 
 # Install extra architectures
 spandrel_extra_arches.install()
@@ -39,6 +49,7 @@ spandrel_extra_arches.install()
 config = configparser.ConfigParser()
 config.read('config.ini')
 
+# Constants
 TOKEN = config['Discord']['Token']
 ADMIN_ID = config['Discord']['AdminId']
 MODEL_PATH = config['Paths']['ModelPath']
@@ -47,101 +58,129 @@ PRECISION = config['Processing'].get('Precision', 'auto').lower()
 MAX_OUTPUT_TOTAL_PIXELS = int(config['Processing']['MaxOutputTotalPixels'])
 UPSCALE_TIMEOUT = int(config['Processing'].get('UpscaleTimeout', 60))
 OTHER_STEP_TIMEOUT = int(config['Processing'].get('OtherStepTimeout', 30))
-THREAD_POOL_WORKERS = int(config['Processing'].get('ThreadPoolWorkers', 1))
 MAX_CONCURRENT_UPSCALES = int(config['Processing'].get('MaxConcurrentUpscales', 1))
 DEFAULT_ALPHA_HANDLING = config['Processing'].get('DefaultAlphaHandling', 'resize').lower()
 GAMMA_CORRECTION = config['Processing'].getboolean('GammaCorrection', False)
+CLEANUP_INTERVAL = int(config['Processing'].get('CleanupInterval', 3)) * 60 * 60  # Convert hours to seconds
 
 # Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='--', intents=intents)
 
-# Thread pool and queue setup
-thread_pool = ThreadPoolExecutor(max_workers=THREAD_POOL_WORKERS)
-upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
-upscale_queue = asyncio.Queue()
+help_text = """ To use the upscale command:
+1. Attach an image and type: 
+   `--upscale <model_name> [alpha_handling]`
+2. Provide an image URL: 
+   `--upscale <model_name> [alpha_handling] <image_url>`
 
-# Model management
-models = {}
-last_cleanup_time = time.time()
-CLEANUP_INTERVAL = 3 * 60 * 60  # 3 hours in seconds
+Example:
+`--upscale RealESRGAN_x4plus resize https://example.com/image.jpg`
+
+Alpha handling options: `upscale`, `resize`, `discard`
+If not specified, the default from the config will be used.
+
+Available commands:
+`--upscale <model_name> [alpha_handling] [image_url]` - Upscale an image using the specified model
+`--models` - List all available upscaling models
+`--resize <scale_factor> <method>` - Allows you to resize images up or down using normal scaling methods (e.g. bicubic, lanczos)
+`--info` - Allows you to view the details of a given image. Useful for DDS images to view the compression type
+
+Use `--models` to see available models. """
 
 # Utility classes
 class StepLogger:
     def __init__(self):
         self.current_step = ""
         self.step_start_time = 0
+        self.running = True
 
     def log_step(self, step_description):
         self.current_step = step_description
         self.step_start_time = time.time()
-        print(f"Step: {self.current_step}")
+        logger.info(f"Step: {self.current_step}")
+
+    def clear_step(self):
+        self.current_step = ""
+        self.step_start_time = 0
 
     async def monitor_progress(self):
-        while True:
-            await asyncio.sleep(10)
-            if self.current_step and self.current_step != "Idle":
-                elapsed_time = time.time() - self.step_start_time
-                print(f"Still working on: {self.current_step} (Elapsed time: {elapsed_time:.2f}s)")
+        while self.running:
+            try:
+                await asyncio.sleep(10)
+                if self.current_step:
+                    elapsed_time = time.time() - self.step_start_time
+                    logger.info(f"Still working on: {self.current_step} (Elapsed time: {elapsed_time:.2f}s)")
+            except asyncio.CancelledError:
+                self.running = False
+                break
 
-step_logger = StepLogger()
+class UpscaleBot(commands.Bot):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.running = True
+        self.tasks = []
+        self.progress_logger = StepLogger()
+        self.upscale_queue = asyncio.Queue()
+        self.upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
+        self.models = {}
+        self.last_cleanup_time = time.time()
 
-@bot.command(name='restart')
-async def restart_bot(ctx):
-    """Admin command to restart the bot."""
-    if str(ctx.author.id) != ADMIN_ID:
-        await ctx.send("You do not have permission to use this command.", delete_after=5)
-        return
+    async def setup_hook(self):
+        """Called when the bot is starting up"""
+        self.tasks.extend([
+            self.loop.create_task(self.process_upscale_queue()),
+            self.loop.create_task(self.cleanup_models()),
+            self.loop.create_task(self.progress_logger.monitor_progress())
+        ])
 
-    restart_message = await ctx.send("Restarting bot...")
-    try:
-        # Delay to allow the message to be deleted
-        await asyncio.sleep(2)
-        await restart_message.delete()
+    async def close(self):
+        """Called when the bot is shutting down"""
+        self.running = False
+        for task in self.tasks:
+            task.cancel()
+        await asyncio.gather(*self.tasks, return_exceptions=True)
+        await super().close()
 
-        # Clean up before restarting
-        await bot.close()
+    async def process_upscale_queue(self):
+        while self.running:
+            try:
+                upscale_task = await asyncio.wait_for(self.upscale_queue.get(), timeout=1.0)
+                try:
+                    async with self.upscale_semaphore:
+                        await upscale_task
+                finally:
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    logger.info("CUDA cache cleared and garbage collected after upscale task.")
+                    self.upscale_queue.task_done()
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                break
 
-        # Use os.execv to restart the process
-        import os
-        import sys
-        os.execv(sys.executable, ['python'] + sys.argv)
-    except Exception as e:
-        error_message = f"Failed to restart bot. Details: {type(e).__name__}: {e}"
-        print(error_message)
-        await ctx.send(f"Error: {error_message}")
+    async def cleanup_models(self):
+        while self.running:
+            try:
+                await asyncio.sleep(60)
+                current_time = time.time()
+                if current_time - self.last_cleanup_time >= CLEANUP_INTERVAL:
+                    logger.info("Performing periodic cleanup of unused models...")
+                    self.models.clear()
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    self.last_cleanup_time = current_time
+                    logger.info("Cache cleanup completed. All models unloaded and memory freed.")
+            except asyncio.CancelledError:
+                break
 
+# Initialize the bot
+bot = UpscaleBot(command_prefix='--', intents=intents)
+bot.remove_command('help')  # Remove the default help command
 
-@bot.event
-async def on_message(message):
-    print(f"on_message triggered for: {message.content}")  # Debug log
-    if message.author == bot.user:
-        return
-
-    if isinstance(message.channel, discord.DMChannel):
-        try:
-            await message.author.send("Sorry, this bot only works in servers, not in DMs.")
-        except discord.HTTPException:
-            pass
-        return
-
-    await bot.process_commands(message)
-
-
-# Sanitize error messages
-def sanitize_error_message(error_message):
-    # Convert to string if it's not already
-    error_message = str(error_message)
-    
-    # Remove file paths
-    sanitized = re.sub(r'File ".*?"', 'File "[PATH REMOVED]"', error_message)
-    
-    return sanitized
-
+# Model management
 def load_model(model_name):
-    if model_name in models:
-        return models[model_name]
+    if model_name in bot.models:
+        return bot.models[model_name]
     
     # Check for both .pth and .safetensors files
     pth_path = os.path.join(MODEL_PATH, f"{model_name}.pth")
@@ -157,13 +196,13 @@ def load_model(model_name):
     try:
         model = spandrel.ModelLoader().load_from_file(model_path)
         if isinstance(model, spandrel.ImageModelDescriptor):
-            models[model_name] = model.cuda().eval()
-            print(f"Loaded model: {model_name}")
-            return models[model_name]
+            bot.models[model_name] = model.cuda().eval()
+            logger.info(f"Loaded model: {model_name}")
+            return bot.models[model_name]
         else:
             raise ValueError(f"Invalid model type for {model_name}")
     except Exception as e:
-        print(f"Failed to load model {model_name}: {str(e)}")
+        logger.error(f"Failed to load model {model_name}: {str(e)}")
         raise
 
 def list_available_models():
@@ -194,7 +233,7 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha, precision,
         img_tensor = torch.from_numpy(np.array(img)).permute(2, 0, 1).float().div_(255.0).unsqueeze(0).cuda()
         _, _, h, w = img_tensor.shape
         output_h, output_w = h * model.scale, w * model.scale
-        step_logger.log_step("Processing image in tiles")
+        bot.progress_logger.log_step("Processing image in tiles")
         
         # Determine the output dtype and inference mode based on model capabilities and PRECISION setting
         if model.supports_bfloat16 and PRECISION in ['auto', 'bf16']:
@@ -207,13 +246,13 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha, precision,
             output_dtype = torch.float32
             autocast_dtype = None
 
-        print(f"Using precision mode: {autocast_dtype}")
+        logger.info(f"Using precision mode: {autocast_dtype}")
 
         output_tensor = torch.zeros((1, img_tensor.shape[1], output_h, output_w), dtype=output_dtype, device='cuda')
         
         for y in range(0, h, tile_size):
             for x in range(0, w, tile_size):
-                step_logger.log_step(f"Processing tile at ({x}, {y})")
+                bot.progress_logger.log_step(f"Processing tile at ({x}, {y})")
                 if check_cancelled():
                     raise asyncio.CancelledError("Upscale operation was cancelled")
                
@@ -238,47 +277,40 @@ def upscale_image(image, model, tile_size, alpha_handling, has_alpha, precision,
 # Bot event handlers
 @bot.event
 async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-    print("Note: This bot is configured to work only in servers, not in DMs.")
-    bot.loop.create_task(process_upscale_queue())
-    bot.loop.create_task(cleanup_models())
+    logger.info(f'{bot.user} has connected to Discord!')
+    logger.info("Note: This bot is configured to work only in servers, not in DMs.")
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        await ctx.send("Command not found. Use --upscale, --models, --resize, or --info")
+    # Let other errors propagate up
+    else:
+        raise error
 
 # Bot commands
+@bot.command()
+async def help(ctx):
+    """Shows the help message"""
+    await ctx.send(help_text)
+
 @bot.command()
 async def upscale(ctx, *args):
     status_msg = None
     selection_msg = None
     try:
-        step_logger.log_step("Initializing upscale command")
+        bot.progress_logger.log_step("Initializing upscale command")
         
-        help_text = """ To use the upscale command:
-1. Attach an image and type: 
-   `--upscale <model_name> [alpha_handling]`
-2. Provide an image URL: 
-   `--upscale <model_name> [alpha_handling] <image_url>`
-
-Example:
-`--upscale RealESRGAN_x4plus resize https://example.com/image.jpg`
-
-Alpha handling options: `upscale`, `resize`, `discard`
-If not specified, the default from the config will be used.
-
-Available commands:
-`--upscale <model_name> [alpha_handling] [image_url]` - Upscale an image using the specified model
-`--models` - List all available upscaling models
-`--resize <scale_factor> <method>` - Allows you to resize images up or down using normal scaling methods (e.g. bicubic, lanczos)
-`--info` - Allows you to view the details of a given image. Useful for DDS images to view the compression type
-
-Use `--models` to see available models. """
-
+        # Check if any arguments were provided
+        if not args:
+            await ctx.send(help_text)
+            bot.progress_logger.clear_step()
+            return
+        
         # Parse arguments
-        model_name = None
+        model_name = args[0]
         image_url = None
         alpha_handling = None
-
-        if args and args[0].lower() == 'downscale':
-            await downscale_command(ctx, args[1:], download_image, GAMMA_CORRECTION)
-            return
 
         if len(args) >= 1:
             model_name = args[0]
@@ -296,6 +328,7 @@ Use `--models` to see available models. """
         
         if model_name is None:
             await ctx.send(help_text)
+            bot.progress_logger.clear_step()
             return
 
         alpha_handling = alpha_handling if alpha_handling else DEFAULT_ALPHA_HANDLING
@@ -351,7 +384,7 @@ Use `--models` to see available models. """
             if not attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
                 await ctx.send("Please upload a valid image file (PNG, JPG, JPEG, or WebP).")
                 return
-            step_logger.log_step("Reading attached image")
+            bot.progress_logger.log_step("Reading attached image")
             try:
                 async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                     image_data = await attachment.read()
@@ -360,7 +393,7 @@ Use `--models` to see available models. """
                 await ctx.send("Error: Image reading took too long and was cancelled.")
                 return
         elif image_url:
-            step_logger.log_step("Downloading image from URL")
+            bot.progress_logger.log_step("Downloading image from URL")
             try:
                 async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                     image, error_message = await download_image(image_url)
@@ -394,12 +427,12 @@ Use `--models` to see available models. """
         status_msg = await ctx.send("Your upscale request has been queued.")
         
         # Add the task to the queue
-        await upscale_queue.put(process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha))
+        await bot.upscale_queue.put(process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha))
 
     except Exception as e:
-        error_message = f"<@{ADMIN_ID}> Error! {sanitize_error_message(str(e))}"
+        error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
         await ctx.send(error_message)
-        print(f"Error in upscale command:")
+        logger.error(f"Error in upscale command:")
         traceback.print_exc()
     finally:
         # Ensure we clean up the selection message if it exists
@@ -484,24 +517,27 @@ async def info(ctx, *args):
         if 'file_path' in locals() and os.path.exists(file_path):
             os.remove(file_path)
 
-async def process_upscale_queue():
-    while True:
-        upscale_task = await upscale_queue.get()
-        try:
-            async with upscale_semaphore:
-                await upscale_task
-        finally:
-            # Clear CUDA cache and perform garbage collection after each upscale task
-            torch.cuda.empty_cache()
-            gc.collect()
-            print("CUDA cache cleared and garbage collected after upscale task.")
-            upscale_queue.task_done()
-
 async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha):
     try:
-        await status_msg.edit(content="Processing your image. This may take a while...")
+        start_time = time.time()
+        
+        # Helper function for safer status updates
+        async def update_status(message):
+            try:
+                await status_msg.edit(content=message)
+            except discord.HTTPException as e:
+                logger.error(f"Failed to update status: {str(e)}")
+            except discord.NotFound:
+                logger.error("Status message was deleted")
+                return False
+            return True
 
-        step_logger.log_step("Preparing model and estimating VRAM usage")
+        # Initial status update
+        if not await update_status("Processing your image. This may take a while..."):
+            return
+            
+        bot.progress_logger.log_step("Preparing model and estimating VRAM usage")
+        
         model = load_model(model_name)
 
         input_size = (image.width, image.height)
@@ -525,66 +561,50 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         if has_alpha:
             status_content += f"\nAlpha handling: {alpha_handling}"
         
-        await status_msg.edit(content=status_content)
+        if not await update_status(status_content):
+            return
 
-        print(f"Starting upscale of image from {image_source}")
-        print(f"Model: {model_name}")
-        print(f"Architecture: {model.architecture.name}")
-        print(f"Input size: {input_size}")
-        print(f"Estimated VRAM usage: {estimated_vram:.2f} GB")
-        print(f"Adjusted tile size: {adjusted_tile_size}")
+        logger.info(f"Starting upscale of image from {image_source}")
+        logger.info(f"Model: {model_name}")
+        logger.info(f"Architecture: {model.architecture.name}")
+        logger.info(f"Input size: {input_size}")
+        logger.info(f"Estimated VRAM usage: {estimated_vram:.2f} GB")
+        logger.info(f"Adjusted tile size: {adjusted_tile_size}")
         if has_alpha:
-            print(f"Alpha handling: {alpha_handling}")
+            logger.info(f"Alpha handling: {alpha_handling}")
 
-        start_time = time.time()
-
-        step_logger.log_step("Upscaling image")
+        bot.progress_logger.log_step("Upscaling image")
         await status_msg.edit(content=f"{status_content}\nUpscaling...")
 
         # Create a cancellation event
         cancel_event = asyncio.Event()
 
-        # Create the upscale function
         def upscale_func():
             def check_cancelled():
                 return cancel_event.is_set()
-            
-            if check_cancelled():
-                raise asyncio.CancelledError("Upscale cancelled")
             return upscale_image(image, model, adjusted_tile_size, alpha_handling, has_alpha, PRECISION, check_cancelled)
-
 
         # Run the upscale function in a separate thread
         upscale_task = asyncio.create_task(asyncio.to_thread(upscale_func))
 
-        # Wait for the upscale task to complete or timeout
         try:
             result = await asyncio.wait_for(upscale_task, timeout=UPSCALE_TIMEOUT)
         except asyncio.TimeoutError:
             cancel_event.set()
-            print("Upscale operation timed out and was cancelled.")
+            bot.progress_logger.clear_step()
+            logger.error("Upscale operation timed out and was cancelled.")
             await status_msg.edit(content="Error: Image processing took too long and was cancelled.")
             try:
                 await upscale_task
             except asyncio.CancelledError:
-                print("Upscale task was successfully cancelled after timeout.")
-            return
-        except asyncio.CancelledError:
-            print("Upscale operation was cancelled.")
-            await status_msg.edit(content="Error: Image processing was cancelled.")
+                logger.info("Upscale task was successfully cancelled after timeout.")
             return
 
         upscale_time = time.time() - start_time
+        bot.progress_logger.clear_step()
         await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds")
-        print(f"Upscale completed in {upscale_time:.2f} seconds")
 
-        # Add downscaling option within upscale result
-        if result.width * result.height > MAX_OUTPUT_TOTAL_PIXELS:
-            scale_factor = (MAX_OUTPUT_TOTAL_PIXELS / (result.width * result.height)) ** 0.5
-            await ctx.send(f"The upscaled image exceeds the maximum allowed size. Automatically downscaling with factor {scale_factor:.2f}.")
-            await process_downscale(ctx, args, result, scale_factor, 'lanczos', GAMMA_CORRECTION)
-            return
-
+        bot.progress_logger.log_step("Saving and compressing image")
         def estimate_file_size(img, format, **params):
             temp_buffer = io.BytesIO()
             img.save(temp_buffer, format=format, **params)
@@ -600,7 +620,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                     high = mid - 1
             return high
 
-        step_logger.log_step("Saving upscaled image")
+        bot.progress_logger.log_step("Saving upscaled image")
         await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing...")
         output_buffer = io.BytesIO()
         save_format = 'WEBP (lossless)'
@@ -618,7 +638,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                 save_format = 'PNG'
                 new_filename = f"{filename_parts[0]}_upscaled.png"
         except Exception as e:
-            print(f"PNG save failed: {str(e)}")
+            logger.debug(f"PNG save failed: {str(e)}")
             output_buffer.seek(0)
             output_buffer.truncate(0)
             
@@ -630,7 +650,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                 save_format = 'WEBP (lossless)'
                 new_filename = f"{filename_parts[0]}_upscaled.webp"
             except Exception as e:
-                print(f"WebP lossless save failed: {str(e)}")
+                logger.debug(f"WebP lossless save failed: {str(e)}")
                 output_buffer.seek(0)
                 output_buffer.truncate(0)
                 
@@ -642,7 +662,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                     new_filename = f"{filename_parts[0]}_upscaled.webp"
                     compression_info = f"lossy (quality {webp_quality})"
                 except Exception as e:
-                    print(f"WebP lossy save failed: {str(e)}")
+                    logger.error(f"WebP lossy save failed: {str(e)}")
                     raise Exception("Unable to compress image to under 10 MB")
 
         compression_time = time.time() - compression_start_time
@@ -651,13 +671,13 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         if compression_info:
             log_message += f" with {compression_info}"
         log_message += f", size: {file_size:.2f} MB"
-        print(log_message)
+        logger.info(log_message)
 
         await status_msg.edit(content=f"{status_content}\nUpscale completed in {upscale_time:.2f} seconds\nCompressing completed in {compression_time:.2f} seconds\nUploading...")
 
         output_buffer.seek(0)
 
-        step_logger.log_step("Uploading upscaled image")
+        bot.progress_logger.log_step("Uploading image")
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                 message = f"<@{ctx.author.id}> Here's your image upscaled with `{model_name}`"
@@ -672,23 +692,13 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                 
                 await asyncio.sleep(5)
                 await status_msg.delete()
-        except discord.errors.HTTPException as e:
-            if e.code == 40005:  # Payload Too Large
-                await status_msg.edit(content=f"<@{ctx.author.id}> The upscaled image is too large to upload, even after compression. You may need to upscale a smaller image or use a model with a lower upscaling factor.")
-            else:
-                raise
         except asyncio.TimeoutError:
             await status_msg.edit(content="Error: Image upload took too long and was cancelled.")
             return
 
-        upload_time = time.time() - start_time - upscale_time - compression_time
-        total_time = time.time() - start_time
-        print(f"Image uploaded in {upload_time:.2f} seconds")
-        print(f"Total processing time: {total_time:.2f} seconds")
-
     except (torch.cuda.OutOfMemoryError, torch.cuda.CudaError, RuntimeError) as e:
         error_message = f"Critical CUDA error occurred. Restarting bot..."
-        print(error_message)
+        logger.error(error_message)
         await status_msg.edit(content=error_message)
         
         try:
@@ -697,29 +707,24 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             os.execv(sys.executable, ['python'] + sys.argv)  # Restart the process
         except Exception as restart_error:
             error_message = f"Failed to restart bot after CUDA error: {restart_error}"
-            print(error_message)
+            logger.error(error_message)
             await status_msg.edit(content=f"<@{ADMIN_ID}> Restart failed. Details: {error_message}")
+
+    except Exception as e:
+        bot.progress_logger.clear_step()
+        error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
+        await ctx.send(error_message)
+        logger.error("Error in upscale command:", exc_info=True)
+
     finally:
+        bot.progress_logger.clear_step()
         torch.cuda.empty_cache()
         gc.collect()
-        print("Upscale cleanup completed, returned to idle state.")
-
-
-
-
-# Cleanup task
-async def cleanup_models():
-    global models, last_cleanup_time
-    while True:
-        await asyncio.sleep(60)  # Check every minute
-        current_time = time.time()
-        if current_time - last_cleanup_time >= CLEANUP_INTERVAL:
-            print("Performing periodic cleanup of unused models...")
-            models.clear()
-            torch.cuda.empty_cache()
-            gc.collect()
-            last_cleanup_time = current_time
-            print("Cache cleanup completed. All models unloaded and memory freed.")
+        logger.info("Upscale cleanup completed, returned to idle state.")
+        try:
+            await status_msg.delete()
+        except discord.HTTPException:
+            pass
 
 # Main execution
 if __name__ == "__main__":
