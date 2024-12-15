@@ -432,7 +432,7 @@ async def upscale(ctx, *args):
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
         await ctx.send(error_message)
-        logger.error(f"Error in upscale command:")
+        logger.error("Error in upscale command:")
         traceback.print_exc()
     finally:
         # Ensure we clean up the selection message if it exists
@@ -697,7 +697,8 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             return
 
     except (torch.cuda.OutOfMemoryError, torch.cuda.CudaError, RuntimeError) as e:
-        error_message = f"Critical CUDA error occurred. Restarting bot..."
+        bot.progress_logger.clear_step()
+        error_message = f"Critical CUDA error occurred. Restarting bot... Error: {str(e)}"
         logger.error(error_message)
         await status_msg.edit(content=error_message)
         
