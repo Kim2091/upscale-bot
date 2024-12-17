@@ -10,6 +10,8 @@ import traceback
 from io import BytesIO
 import logging
 from logging.handlers import RotatingFileHandler
+import psutil
+import subprocess
 
 # Third-party library imports
 import aiohttp
@@ -703,9 +705,43 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         await status_msg.edit(content=error_message)
         
         try:
+            # Get the current process
+            current_process = psutil.Process()
+            
+            # Get all child processes
+            children = current_process.children(recursive=True)
+            
+            # Terminate child processes
+            for child in children:
+                try:
+                    child.terminate()
+                except psutil.NoSuchProcess:
+                    pass
+            
+            # Wait for child processes to terminate
+            psutil.wait_procs(children, timeout=3)
+            
+            # Force kill any remaining children
+            for child in children:
+                try:
+                    if child.is_running():
+                        child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            
             # Proper cleanup before restart
             await bot.close()  # Ensure all tasks and handlers are closed
-            os.execv(sys.executable, ['python'] + sys.argv)  # Restart the process
+            
+            # Start a new process before terminating the current one
+            python = sys.executable
+            script_path = os.path.abspath(sys.argv[0])
+            
+            # Use subprocess to start a new instance in the same console
+            subprocess.Popen([python, script_path])
+        
+            # Exit the current process
+            os._exit(0)
+            
         except Exception as restart_error:
             error_message = f"Failed to restart bot after CUDA error: {restart_error}"
             logger.error(error_message)
