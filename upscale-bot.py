@@ -406,10 +406,17 @@ async def upscale(ctx, *args):
             bot.progress_logger.log_step("Reading attached image")
             try:
                 async with asyncio.timeout(OTHER_STEP_TIMEOUT):
+                    bot.progress_logger.log_step("Reading attached image")
                     image_data = await attachment.read()
                     image = Image.open(BytesIO(image_data))
+                    bot.progress_logger.clear_step()  # Clear step on success
             except asyncio.TimeoutError:
+                bot.progress_logger.clear_step()  # Clear step on timeout
                 await ctx.send("Error: Image reading took too long and was cancelled.")
+                return
+            except Exception as e:
+                bot.progress_logger.clear_step()  # Clear step on any error
+                await ctx.send(f"Error: Failed to read the image. Details: {str(e)}")
                 return
         elif image_url:
             bot.progress_logger.log_step("Downloading image from URL")
@@ -424,6 +431,11 @@ async def upscale(ctx, *args):
                 return
         else:
             await ctx.send("Please either attach an image or provide a valid image URL.")
+            return
+
+        # Check if the image has 4 channels (RGBA)
+        if image.mode != 'RGBA':
+            await ctx.send("**Error**: The selected model requires an RGBA image (4 channels), but the provided image has insufficient channels. Please upload an RGBA image (ensure it has an alpha layer/transparency).")
             return
 
         # Calculate the output image size
@@ -767,7 +779,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         bot.progress_logger.clear_step()
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
         await ctx.send(error_message)
-        logger.error("Error in upscale command:", exc_info=True)    
+        logger.error("Error in upscale command:", exc_info=True)
 
     finally:
         bot.progress_logger.clear_step()
