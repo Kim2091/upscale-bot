@@ -138,10 +138,27 @@ class UpscaleBot(commands.Bot):
     async def close(self):
         """Called when the bot is shutting down"""
         self.running = False
+        
+        # Cancel tasks one by one with a limit on recursion
         for task in self.tasks:
-            task.cancel()
-        await asyncio.gather(*self.tasks, return_exceptions=True)
-        await super().close()
+            try:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
+            except Exception as e:
+                logger.error(f"Error cancelling task: {e}")
+        
+        # Clear the task list
+        self.tasks.clear()
+        
+        # Ensure parent close method is called
+        try:
+            await super().close()
+        except Exception as e:
+            logger.error(f"Error in parent close: {e}")
 
     async def process_upscale_queue(self):
         while self.running:
@@ -708,20 +725,18 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
             # Get the current process
             current_process = psutil.Process()
             
-            # Get all child processes
+            # Terminate child processes more safely
             children = current_process.children(recursive=True)
-            
-            # Terminate child processes
             for child in children:
                 try:
                     child.terminate()
                 except psutil.NoSuchProcess:
                     pass
             
-            # Wait for child processes to terminate
+            # Brief wait for graceful termination
             psutil.wait_procs(children, timeout=3)
             
-            # Force kill any remaining children
+            # Force kill remaining processes
             for child in children:
                 try:
                     if child.is_running():
@@ -729,18 +744,19 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                 except psutil.NoSuchProcess:
                     pass
             
-            # Proper cleanup before restart
-            await bot.close()  # Ensure all tasks and handlers are closed
+            # Clean shutdown of the bot
+            try:
+                await bot.close()
+            except Exception as close_error:
+                logger.error(f"Error during bot shutdown: {close_error}")
             
-            # Start a new process before terminating the current one
+            # Start new process
             python = sys.executable
             script_path = os.path.abspath(sys.argv[0])
-            
-            # Use subprocess to start a new instance in the same console
             subprocess.Popen([python, script_path])
-        
-            # Exit the current process
-            os._exit(0)
+            
+            # Exit current process
+            sys.exit(0)  # Use sys.exit instead of os._exit for more graceful shutdown
             
         except Exception as restart_error:
             error_message = f"Failed to restart bot after CUDA error: {restart_error}"
@@ -751,7 +767,7 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         bot.progress_logger.clear_step()
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
         await ctx.send(error_message)
-        logger.error("Error in upscale command:", exc_info=True)
+        logger.error("Error in upscale command:", exc_info=True)    
 
     finally:
         bot.progress_logger.clear_step()
