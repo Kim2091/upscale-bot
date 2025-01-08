@@ -12,7 +12,8 @@ logger = logging.getLogger('UpscaleBot')
 # Define choices for alpha handling
 ALPHA_CHOICES = Literal["resize", "upscale", "discard"]
 # Define choices for resize methods
-RESIZE_METHODS = Literal["lanczos", "bicubic", "bilinear", "nearest"]
+RESIZE_METHODS = Literal["nearest", "box", "linear", "hermite", "hamming", "hann",
+        "lanczos", "catrom", "mitchell", "bspline", "lagrange", "gauss"]
 
 class ImageSource(discord.app_commands.Group):
     """A group to ensure mutual exclusivity between image and URL parameters"""
@@ -24,10 +25,41 @@ def register_slash_commands(bot):
     
     @bot.tree.command(name="help", description="Show help information for the bot")
     async def help_slash(interaction: discord.Interaction):
-        await interaction.response.send_message(bot.help_text)
+        """Send help information for the bot."""
+        help_text = (
+            "**Available Commands:**\n\n"
+            "1. **/upscale**\n"
+            "   - **Description**: Upscale an image using a specified model.\n"
+            "   - **Parameters**:\n"
+            "     - `model`: The upscaling model to use (required).\n"
+            "     - `image`: The image file to upscale (optional).\n"
+            "     - `url`: URL of the image to upscale (optional).\n"
+            "     - `alpha_handling`: How to handle alpha/transparency (options: `resize`, `upscale`, `discard`).\n\n"
+            
+            "2. **/models**\n"
+            "   - **Description**: List available upscaling models.\n"
+            "   - **Parameters**:\n"
+            "     - `search_term`: Optional term to filter models by name.\n\n"
+            
+            "3. **/resize**\n"
+            "   - **Description**: Resize an image using specified scaling method.\n"
+            "   - **Parameters**:\n"
+            "     - `scale_factor`: Scale factor for resizing (e.g., `2.0` for 2x) (required).\n"
+            "     - `method`: The resizing method to use (e.g., `lanczos`, `bicubic`) (optional, default: `lanczos`).\n"
+            "     - `image`: The image file to resize (optional).\n"
+            "     - `url`: URL of the image to resize (optional).\n\n"
+            
+            "4. **/info**\n"
+            "   - **Description**: Get information about an image.\n"
+            "   - **Parameters**:\n"
+            "     - `image`: The image file to analyze (optional).\n"
+            "     - `url`: URL of the image to analyze (optional).\n"
+        )
+        await interaction.response.send_message(help_text)
 
     @bot.tree.command(name="models", description="List available upscaling models")
     async def models_slash(interaction: discord.Interaction, search_term: str = None):
+        logger.info(f"Models command called with search term: {search_term}")
         try:
             models_list = bot.list_available_models(search_term)
             if not models_list:
@@ -50,6 +82,11 @@ def register_slash_commands(bot):
             await interaction.response.send_message(message_chunks[0])
             for chunk in message_chunks[1:]:
                 await interaction.followup.send(chunk)
+
+            # Send the total number of models at the end
+            total_models = len(models_list)
+            await interaction.followup.send(f"Total number of available models: {total_models}")
+
         except Exception as e:
             logger.error(f"Error in models slash command: {e}")
             await interaction.response.send_message("An error occurred while listing models.")
@@ -82,6 +119,7 @@ def register_slash_commands(bot):
         image: Optional[discord.Attachment] = None,
         url: Optional[str] = None
     ):
+        logger.info(f"Info command called with image: {image}, url: {url}")
         if not image and not url:
             await interaction.response.send_message("Please provide either an image or a URL.", ephemeral=True)
             return
@@ -117,6 +155,7 @@ def register_slash_commands(bot):
         url: Optional[str] = None,
         alpha_handling: Optional[ALPHA_CHOICES] = None
     ):
+        logger.info(f"Upscale command called with model: {model}, image: {image}, url: {url}, alpha_handling: {alpha_handling}")
         if not image and not url:
             await interaction.response.send_message("Please provide either an image or a URL.", ephemeral=True)
             return
@@ -153,6 +192,7 @@ def register_slash_commands(bot):
         image: Optional[discord.Attachment] = None,
         url: Optional[str] = None
     ):
+        logger.info(f"Resize command called with scale_factor: {scale_factor}, method: {method}, image: {image}, url: {url}")
         if not image and not url:
             await interaction.response.send_message("Please provide either an image or a URL.", ephemeral=True)
             return
