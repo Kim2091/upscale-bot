@@ -29,6 +29,7 @@ from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.image_info import get_image_info, format_image_info
 from utils.resize_module import resize_command
 from utils.vram_estimator import estimate_vram_and_tile_size
+from utils.slash_commands import register_slash_commands
 
 # Setup logging
 log_formatter = logging.Formatter('\033[38;2;118;118;118m%(asctime)s\033[0m - \033[38;2;59;120;255m%(levelname)s\033[0m - %(message)s')
@@ -141,7 +142,6 @@ class StepLogger:
 class UpscaleBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Remove the tree initialization here to prevent duplicate trees
         self.running = True
         self.tasks = []
         self.progress_logger = StepLogger()
@@ -149,9 +149,22 @@ class UpscaleBot(commands.Bot):
         self.upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
         self.models = {}
         self.last_cleanup_time = time.time()
+        self.help_text = help_text  # Make help_text accessible to slash commands
+        self.model_path = MODEL_PATH  # Make model path accessible
+
+    def list_available_models(self, search_term=None):
+        """Returns a list of available model names"""
+        models = [os.path.splitext(f)[0] for f in os.listdir(self.model_path) 
+                 if f.endswith(('.pth', '.safetensors'))]
+        if search_term:
+            return [m for m in models if search_term.lower() in m.lower()]
+        return sorted(models)
 
     async def setup_hook(self):
         """Called when the bot is starting up"""
+        # Register slash commands
+        register_slash_commands(self)
+        
         # Sync slash commands
         await self.tree.sync()
         
@@ -240,102 +253,6 @@ async def global_permissions(ctx):
         return False
     return True
 
-# Slash Commands Implementation
-@bot.tree.command(name="help", description="Show help information for the bot")
-async def help_slash(interaction: discord.Interaction):
-    await interaction.response.send_message(help_text)
-
-@bot.tree.command(name="models", description="List available upscaling models")
-async def models_slash(interaction: discord.Interaction, search_term: str = None):
-    try:
-        models_list = list_available_models(search_term)
-        if not models_list:
-            await interaction.response.send_message("No models found.")
-            return
-        
-        # Discord has a message length limit, so we'll split long lists
-        message_chunks = []
-        current_chunk = "Available Models:\n"
-        for model in models_list:
-            if len(current_chunk) + len(model) + 2 > 2000:  # Leave room for formatting
-                message_chunks.append(current_chunk)
-                current_chunk = "Continued:\n"
-            current_chunk += f"- {model}\n"
-        
-        if current_chunk:
-            message_chunks.append(current_chunk)
-        
-        # Send the first chunk and follow up with others if needed
-        await interaction.response.send_message(message_chunks[0])
-        for chunk in message_chunks[1:]:
-            await interaction.followup.send(chunk)
-    except Exception as e:
-        logger.error(f"Error in models slash command: {e}")
-        await interaction.response.send_message("An error occurred while listing models.")
-
-@bot.tree.command(name="info", description="Get information about an image")
-async def info_slash(
-    interaction: discord.Interaction, 
-    image: discord.Attachment = None, 
-    url: str = None
-):
-    # Reuse the existing info function logic
-    ctx = await commands.Context.from_interaction(interaction)
-    
-    # Prepare arguments for the existing info function
-    args = []
-    if image:
-        args.append(image.url)
-    if url:
-        args.append(url)
-    
-    # Call the existing info function
-    await info(ctx, *args)
-
-@bot.tree.command(name="upscale", description="Upscale an image using a specified model")
-async def upscale_slash(
-    interaction: discord.Interaction, 
-    model: str, 
-    image: discord.Attachment = None, 
-    url: str = None, 
-    alpha_handling: str = None
-):
-    # Reuse the existing upscale function logic
-    ctx = await commands.Context.from_interaction(interaction)
-    
-    # Prepare arguments for the existing upscale function
-    args = [model]
-    if alpha_handling:
-        args.append(alpha_handling)
-    if image:
-        args.append(image.url)
-    if url:
-        args.append(url)
-    
-    # Call the existing upscale function
-    await upscale(ctx, *args)
-
-@bot.tree.command(name="resize", description="Resize an image using specified scaling method")
-async def resize_slash(
-    interaction: discord.Interaction, 
-    scale_factor: float, 
-    method: str = "lanczos", 
-    image: discord.Attachment = None, 
-    url: str = None
-):
-    # Reuse the existing resize function logic
-    ctx = await commands.Context.from_interaction(interaction)
-    
-    # Prepare arguments for the existing resize function
-    args = [str(scale_factor), method]
-    if image:
-        args.append(image.url)
-    if url:
-        args.append(url)
-    
-    # Call the existing resize function
-    await resize(ctx, *args)
-
 # Model management
 def load_model(model_name):
     if model_name in bot.models:
@@ -363,9 +280,6 @@ def load_model(model_name):
     except Exception as e:
         logger.error(f"Failed to load model {model_name}: {str(e)}")
         raise
-
-def list_available_models():
-    return [os.path.splitext(f)[0] for f in os.listdir(MODEL_PATH) if f.endswith(('.pth', '.safetensors'))]
 
 # Image processing functions
 async def download_image(url):
@@ -499,7 +413,7 @@ async def upscale(ctx, *args):
             alpha_handling = DEFAULT_ALPHA_HANDLING
 
         # Model selection and validation
-        available_models = list_available_models()
+        available_models = bot.list_available_models()
         if model_name not in available_models:
             closest_matches = find_closest_models(model_name, available_models)
             if closest_matches:
@@ -610,7 +524,7 @@ async def resize(ctx, *args):
 
 @bot.command(name='models')
 async def list_models(ctx, search_term: str = None):
-    available_models = list_available_models()
+    available_models = bot.list_available_models(search_term)
     if not available_models:
         await ctx.send("No models are currently available.")
         return
