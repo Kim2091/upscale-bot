@@ -65,6 +65,27 @@ DEFAULT_ALPHA_HANDLING = config['Processing'].get('DefaultAlphaHandling', 'resiz
 GAMMA_CORRECTION = config['Processing'].getboolean('GammaCorrection', False)
 CLEANUP_INTERVAL = int(config['Processing'].get('CleanupInterval', 3)) * 60 * 60  # Convert hours to seconds
 
+DM_ALLOWED_USERS = set()
+if 'Permissions' in config and 'DMAllowedUsers' in config['Permissions']:
+    # Split by commas and convert to set of integers
+    DM_ALLOWED_USERS = set(int(uid.strip()) for uid in config['Permissions']['DMAllowedUsers'].split(',') if uid.strip())
+
+def can_use_dm(ctx):
+    """
+    Check if a user can use the bot in DMs.
+    Returns True if:
+    1. The message is in a guild (not a DM)
+    2. The message is a DM AND the user is in the allowed list
+    """
+    # If in a guild, always allow
+    if ctx.guild is not None:
+        return True
+    
+    # If in DM, check if user is allowed
+    return ctx.author.id in DM_ALLOWED_USERS
+
+
+
 # Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
@@ -196,6 +217,16 @@ class UpscaleBot(commands.Bot):
 bot = UpscaleBot(command_prefix='--', intents=intents)
 bot.remove_command('help')  # Remove the default help command
 
+# Add this after bot initialization
+@bot.check
+async def global_permissions(ctx):
+    """Global check for all commands"""
+    has_permission = can_use_dm(ctx)
+    if not has_permission:
+        await ctx.send("This bot can only be used in servers. If you need DM access, please contact the bot administrator.")
+        return False
+    return True
+
 # Model management
 def load_model(model_name):
     if model_name in bot.models:
@@ -303,6 +334,9 @@ async def on_ready():
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         await ctx.send("Command not found. Use --upscale, --models, --resize, or --info")
+    elif isinstance(error, commands.CheckFailure):
+        # We've already sent a message in the global check, so just silently handle it
+        pass
     # Let other errors propagate up
     else:
         raise error
