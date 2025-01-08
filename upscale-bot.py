@@ -137,9 +137,11 @@ class StepLogger:
                 self.running = False
                 break
 
+# Modify the UpscaleBot class to include tree support
 class UpscaleBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Remove the tree initialization here to prevent duplicate trees
         self.running = True
         self.tasks = []
         self.progress_logger = StepLogger()
@@ -150,6 +152,9 @@ class UpscaleBot(commands.Bot):
 
     async def setup_hook(self):
         """Called when the bot is starting up"""
+        # Sync slash commands
+        await self.tree.sync()
+        
         self.tasks.extend([
             self.loop.create_task(self.process_upscale_queue()),
             self.loop.create_task(self.cleanup_models()),
@@ -181,6 +186,21 @@ class UpscaleBot(commands.Bot):
         except Exception as e:
             logger.error(f"Error in parent close: {e}")
 
+    async def cleanup_models(self):
+        while self.running:
+            try:
+                await asyncio.sleep(60)
+                current_time = time.time()
+                if current_time - self.last_cleanup_time >= CLEANUP_INTERVAL:
+                    logger.info("Performing periodic cleanup of unused models...")
+                    self.models.clear()
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    self.last_cleanup_time = current_time
+                    logger.info("Cache cleanup completed. All models unloaded and memory freed.")
+            except asyncio.CancelledError:
+                break
+
     async def process_upscale_queue(self):
         while self.running:
             try:
@@ -197,25 +217,18 @@ class UpscaleBot(commands.Bot):
                 continue
             except asyncio.CancelledError:
                 break
-
-    async def cleanup_models(self):
-        while self.running:
-            try:
-                await asyncio.sleep(60)
-                current_time = time.time()
-                if current_time - self.last_cleanup_time >= CLEANUP_INTERVAL:
-                    logger.info("Performing periodic cleanup of unused models...")
-                    self.models.clear()
-                    torch.cuda.empty_cache()
-                    gc.collect()
-                    self.last_cleanup_time = current_time
-                    logger.info("Cache cleanup completed. All models unloaded and memory freed.")
-            except asyncio.CancelledError:
-                break
-
+            
 # Initialize the bot
 bot = UpscaleBot(command_prefix='--', intents=intents)
 bot.remove_command('help')  # Remove the default help command
+
+# Add a sync command for slash commands
+@bot.command(description="Syncs your slash commands to the Discord API.")
+async def sync(ctx: commands.Context) -> None:
+    await ctx.send("Syncing commands...")
+    await bot.tree.sync()
+
+
 
 # Add this after bot initialization
 @bot.check
@@ -226,6 +239,102 @@ async def global_permissions(ctx):
         await ctx.send("This bot can only be used in servers. If you need DM access, please contact the bot administrator.")
         return False
     return True
+
+# Slash Commands Implementation
+@bot.tree.command(name="help", description="Show help information for the bot")
+async def help_slash(interaction: discord.Interaction):
+    await interaction.response.send_message(help_text)
+
+@bot.tree.command(name="models", description="List available upscaling models")
+async def models_slash(interaction: discord.Interaction, search_term: str = None):
+    try:
+        models_list = list_available_models(search_term)
+        if not models_list:
+            await interaction.response.send_message("No models found.")
+            return
+        
+        # Discord has a message length limit, so we'll split long lists
+        message_chunks = []
+        current_chunk = "Available Models:\n"
+        for model in models_list:
+            if len(current_chunk) + len(model) + 2 > 2000:  # Leave room for formatting
+                message_chunks.append(current_chunk)
+                current_chunk = "Continued:\n"
+            current_chunk += f"- {model}\n"
+        
+        if current_chunk:
+            message_chunks.append(current_chunk)
+        
+        # Send the first chunk and follow up with others if needed
+        await interaction.response.send_message(message_chunks[0])
+        for chunk in message_chunks[1:]:
+            await interaction.followup.send(chunk)
+    except Exception as e:
+        logger.error(f"Error in models slash command: {e}")
+        await interaction.response.send_message("An error occurred while listing models.")
+
+@bot.tree.command(name="info", description="Get information about an image")
+async def info_slash(
+    interaction: discord.Interaction, 
+    image: discord.Attachment = None, 
+    url: str = None
+):
+    # Reuse the existing info function logic
+    ctx = await commands.Context.from_interaction(interaction)
+    
+    # Prepare arguments for the existing info function
+    args = []
+    if image:
+        args.append(image.url)
+    if url:
+        args.append(url)
+    
+    # Call the existing info function
+    await info(ctx, *args)
+
+@bot.tree.command(name="upscale", description="Upscale an image using a specified model")
+async def upscale_slash(
+    interaction: discord.Interaction, 
+    model: str, 
+    image: discord.Attachment = None, 
+    url: str = None, 
+    alpha_handling: str = None
+):
+    # Reuse the existing upscale function logic
+    ctx = await commands.Context.from_interaction(interaction)
+    
+    # Prepare arguments for the existing upscale function
+    args = [model]
+    if alpha_handling:
+        args.append(alpha_handling)
+    if image:
+        args.append(image.url)
+    if url:
+        args.append(url)
+    
+    # Call the existing upscale function
+    await upscale(ctx, *args)
+
+@bot.tree.command(name="resize", description="Resize an image using specified scaling method")
+async def resize_slash(
+    interaction: discord.Interaction, 
+    scale_factor: float, 
+    method: str = "lanczos", 
+    image: discord.Attachment = None, 
+    url: str = None
+):
+    # Reuse the existing resize function logic
+    ctx = await commands.Context.from_interaction(interaction)
+    
+    # Prepare arguments for the existing resize function
+    args = [str(scale_factor), method]
+    if image:
+        args.append(image.url)
+    if url:
+        args.append(url)
+    
+    # Call the existing resize function
+    await resize(ctx, *args)
 
 # Model management
 def load_model(model_name):
