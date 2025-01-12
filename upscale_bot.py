@@ -162,17 +162,27 @@ class UpscaleBot(commands.Bot):
 
     async def setup_hook(self):
         """Called when the bot is starting up"""
+        logger.info("Setting up bot...")
+        
         # Register slash commands
+        logger.info("Registering slash commands...")
         register_slash_commands(self)
         
-        # Sync slash commands
-        await self.tree.sync()
-        
-        self.tasks.extend([
-            self.loop.create_task(self.process_upscale_queue()),
-            self.loop.create_task(self.cleanup_models()),
-            self.loop.create_task(self.progress_logger.monitor_progress())
-        ])
+        try:
+            # For global commands
+            logger.info("Syncing global commands...")
+            try:
+                await self.tree.sync()  # Attempt to sync globally
+                logger.info("Global commands synced successfully.")
+            except Exception as e:
+                logger.error(f"Failed to sync global commands: {e}")
+            
+            # Log all registered commands
+            commands = await self.tree.fetch_commands()
+            logger.info(f"Registered commands: {[cmd.name for cmd in commands]}")
+            
+        except Exception as e:
+            logger.error(f"Failed to sync command tree: {e}", exc_info=True)
 
     async def close(self):
         """Called when the bot is shutting down"""
@@ -231,25 +241,25 @@ class UpscaleBot(commands.Bot):
             except asyncio.CancelledError:
                 break
             
-# Initialize the bot
-bot = UpscaleBot(command_prefix='--', intents=intents)
+# Initialize the bot with a ridiculous prefix that no one will ever figure out unless they read the code
+# Limits users to slash commands
+bot = UpscaleBot(command_prefix='---------------', intents=intents)
 bot.remove_command('help')  # Remove the default help command
 
 # Add a sync command for slash commands
-@bot.command(description="Syncs your slash commands to the Discord API.")
-async def sync(ctx: commands.Context) -> None:
-    await ctx.send("Syncing commands...")
+@bot.tree.command(description="Syncs your slash commands to the Discord API.")
+async def sync(ctx: discord.Interaction) -> None:
+    await ctx.response.send_message("Syncing commands...")
     await bot.tree.sync()
 
-
-
-# Add this after bot initialization
+# Global permissions check for slash commands
 @bot.check
 async def global_permissions(ctx):
     """Global check for all commands"""
     has_permission = can_use_dm(ctx)
     if not has_permission:
-        await ctx.send("This bot can only be used in servers. If you need DM access, please contact the bot administrator.")
+        if ctx.guild is None:  # Check if the context is a DM
+            await ctx.send("This bot can only be used in servers. If you need DM access, please contact the bot administrator.")
         return False
     return True
 
@@ -506,7 +516,7 @@ async def upscale(ctx, *args):
         status_msg = await ctx.send("Your upscale request has been queued.")
         
         # Add the task to the queue
-        await bot.upscale_queue.put(process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha))
+        await bot.upscale_queue.put(await process_upscale(ctx, model_name, image, status_msg, alpha_handling, has_alpha))
 
     except Exception as e:
         error_message = f"<@{ADMIN_ID}> Error! {str(e)}"
