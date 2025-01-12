@@ -365,17 +365,57 @@ async def model_autocomplete(
 # Initialize bot first
 bot = UpscaleBot(command_prefix=None, intents=intents)
 
-# Then define sync command
-@bot.tree.command(description="Syncs your slash commands to the Discord API.")
-async def sync(interaction: discord.Interaction) -> None:
-    await interaction.response.send_message("Syncing commands...")
+# Then define sync_global command
+@bot.tree.command(description="Syncs your slash commands to the Discord API globally.")
+async def sync_global(interaction: discord.Interaction) -> None:
+    # Check if the user is the admin
+    if interaction.user.id != int(ADMIN_ID):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("Syncing global commands...")
     try:
         await bot.tree.sync()
         logger.info("Slash commands synced successfully.")
         await interaction.followup.send("Slash commands synced successfully!")  # Send follow-up message
     except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
-        await interaction.followup.send("Failed to sync commands. Please check the logs for more details.")
+        logger.error(f"Failed to sync global commands: {e}")
+        await interaction.followup.send("Failed to sync global commands. Please check the logs for more details.")
+
+# Define sync command for the current guild
+@bot.tree.command(description="Syncs commands to the current guild.")
+async def sync(interaction: discord.Interaction) -> None:
+    logger.info(f"Sync command called by user: {interaction.user.id}")
+
+    # Check if the user is the admin
+    if interaction.user.id != int(ADMIN_ID):
+        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        logger.warning(f"User {interaction.user.id} attempted to use sync command without permission.")
+        return
+
+    # Acknowledge the interaction
+    await interaction.response.defer(thinking=True)
+
+    guild_id = interaction.guild.id  # Get the current guild ID
+    test_guild = discord.Object(id=guild_id)  # Create a guild object for the current guild
+    logger.info(f"Clearing commands for guild: {test_guild.id}")
+
+    # Clear existing commands for the guild
+    bot.tree.clear_commands(guild=test_guild)
+
+    logger.info(f"Copying global commands to guild: {test_guild.id}")
+    
+    # Copy global commands to the guild
+    bot.tree.copy_global_to(guild=test_guild)
+    logger.info("Syncing commands to guild...")
+    
+    try:
+        await bot.tree.sync(guild=test_guild)
+        logger.info("Commands synced successfully to guild.")
+        await interaction.followup.send("Commands synced successfully to this guild!")  # Send follow-up message
+    except Exception as e:
+        logger.error(f"Failed to sync commands to guild: {e}")
+        await interaction.followup.send("Failed to sync commands to this guild. Please check the logs for more details.")
 
 def can_use_dm(ctx):
     """Check if a user can use the bot in DMs"""
@@ -481,6 +521,8 @@ async def download_image(url):
 async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
     logger.info("Note: This bot is configured to work only in servers, not in DMs.")
+    
+
 
 @bot.event
 async def on_command_error(ctx, error):
