@@ -3,9 +3,7 @@ from discord import app_commands
 import logging
 from typing import Optional, Literal
 
-from utils.alpha_handler import handle_alpha
-from utils.resize_module import resize_command
-from utils.fuzzy_model_matcher import find_closest_models, search_models
+from utils.fuzzy_model_matcher import find_closest_models
 
 logger = logging.getLogger('UpscaleBot')
 
@@ -22,7 +20,11 @@ class ImageSource(discord.app_commands.Group):
 
 def register_slash_commands(bot):
     """Register all slash commands with the bot"""
-    
+
+    logger.info("Starting slash command registration...")
+    # Keep track of registered commands
+    registered_commands = []
+
     @bot.tree.command(name="help", description="Show help information for the bot")
     async def help_slash(interaction: discord.Interaction):
         """Send help information for the bot."""
@@ -56,9 +58,12 @@ def register_slash_commands(bot):
             "     - `url`: URL of the image to analyze (optional).\n"
         )
         await interaction.response.send_message(help_text)
+    registered_commands.append("help_slash")  # Add after each command
+    logger.info("Registered command: help_slash")  # Log each registration
 
     @bot.tree.command(name="models", description="List available upscaling models")
-    async def models_slash(interaction: discord.Interaction, search_term: str = None):
+    @app_commands.describe(search_term="The term to filter models by name (required)")
+    async def models_slash(interaction: discord.Interaction, search_term: str):
         logger.info(f"Models command called with search term: {search_term}")
         try:
             models_list = bot.list_available_models(search_term)
@@ -90,6 +95,8 @@ def register_slash_commands(bot):
         except Exception as e:
             logger.error(f"Error in models slash command: {e}")
             await interaction.response.send_message("An error occurred while listing models.")
+    registered_commands.append("models_slash")  # Add after each command
+    logger.info("Registered command: models_slash")  # Log each registration
 
     async def model_autocomplete(
         interaction: discord.Interaction,
@@ -139,6 +146,8 @@ def register_slash_commands(bot):
         
         # Call the existing info function
         await bot.get_command('info')(ctx, *args)
+    registered_commands.append("info_slash")  # Add after each command
+    logger.info("Registered command: info_slash")  # Log each registration
 
     @bot.tree.command(name="upscale", description="Upscale an image using a specified model")
     @app_commands.describe(
@@ -178,6 +187,9 @@ def register_slash_commands(bot):
         # Call the existing upscale function
         await bot.get_command('upscale')(ctx, *args)
 
+    registered_commands.append("upscale_slash")  # Add after each command
+    logger.info("Registered command: upscale_slash")  # Log each registration
+
     @bot.tree.command(name="resize", description="Resize an image using specified scaling method")
     @app_commands.describe(
         scale_factor="Scale factor for resizing (e.g., 2.0 for 2x)",
@@ -212,3 +224,5 @@ def register_slash_commands(bot):
         
         # Call the existing resize function
         await bot.get_command('resize')(ctx, *args)
+    registered_commands.append("resize_slash")  # Add after each command
+    logger.info("Registered command: resize_slash")  # Log each registration
