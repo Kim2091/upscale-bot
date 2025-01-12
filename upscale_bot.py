@@ -681,6 +681,7 @@ async def info_slash(
         await interaction.followup.send(error_msg)
 
 @app_commands.autocomplete(model=model_autocomplete)
+@bot.tree.command(name="upscale", description="Upscale an image using a specified model")
 async def upscale_slash(
     interaction: discord.Interaction, 
     model: str,
@@ -797,6 +798,20 @@ async def upscale_slash(
             await status_msg.edit(content=error_msg)
         else:
             await interaction.followup.send(error_msg)
+
+async def sync_commands():
+    """Sync commands to Discord API."""
+    try:
+        # Clear existing commands
+        existing_commands = await bot.tree.fetch_commands()
+        for command in existing_commands:
+            await bot.tree.delete_command(command.id)
+
+        # Sync new commands
+        await bot.tree.sync()
+        logger.info("Commands synced successfully.")
+    except Exception as e:
+        logger.error(f"Failed to sync commands: {e}")
 
 # Main execution
 if __name__ == "__main__":
