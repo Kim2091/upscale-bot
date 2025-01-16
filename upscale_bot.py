@@ -561,19 +561,35 @@ async def resize_slash(
             await interaction.followup.send("Please provide either an image or a URL, not both.")
             return
 
-        # Create status message
+        # Create status message and start timing
+        start_time = time.time()
         status_msg = await interaction.followup.send("Processing your request...")
-
-        try:
-            # Get the image
-            if image:
-                image_data = await image.read()
-                img = Image.open(BytesIO(image_data))
-            else:  # url
-                img, error = await download_image(url)
-                if error:
-                    await status_msg.edit(content=f"Error: {error}")
-                    return
+        
+        # Get the image
+        if image:
+            image_data = await image.read()
+            img = Image.open(BytesIO(image_data))
+            image_source_desc = f"attachment: {image.filename}"
+            
+            # Prepare input image details
+            file_size = len(image_data) / (1024 * 1024)  # Convert bytes to MB
+            resolution = f"{img.width}x{img.height}"
+            details_message = (
+                f"**Input Image Details:**\n"
+                f"**Name:** {image.filename}\n"
+                f"**Size:** {file_size:.2f} MB\n"
+                f"**Resolution:** {resolution}\n"
+                f"Here is your input image:"
+            )
+            
+            # Send the input image and details in one message
+            await interaction.followup.send(content=details_message, file=discord.File(fp=BytesIO(image_data), filename=image.filename))
+        else:  # url
+            img, error = await download_image(url)
+            if error:
+                await status_msg.edit(content=f"Error: {error}")
+                return
+            image_source_desc = "provided URL"
 
             # Process the resize using the existing module
             from utils.resize_module import resize_image, get_available_filters
