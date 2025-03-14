@@ -1,5 +1,7 @@
 # Discord Upscaling Bot
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/J3J3BCC3L)
+
 A Discord bot that performs image upscaling using various super-resolution models. Users can easily upload images to this bot and have them upscaled with the model of their choice.
 
 ## Features
