@@ -29,7 +29,6 @@ from utils.fuzzy_model_matcher import find_closest_models, search_models
 from utils.image_info import get_image_info, format_image_info
 from utils.resize_module import resize_command
 from utils.vram_estimator import estimate_vram_and_tile_size
-from utils.watermark import add_watermark
 
 # Setup logging
 log_formatter = logging.Formatter('\033[38;2;118;118;118m%(asctime)s\033[0m - \033[38;2;59;120;255m%(levelname)s\033[0m - %(message)s')
@@ -646,11 +645,6 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
 
         try:
             result = await asyncio.wait_for(upscale_task, timeout=UPSCALE_TIMEOUT)
-            
-            # Add watermark if using 4x-UltraSharpV2
-            if model_name == "4x-UltraSharpV2":
-                result = add_watermark(result)
-                
         except asyncio.TimeoutError:
             cancel_event.set()
             bot.progress_logger.clear_step()
@@ -743,8 +737,6 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
         try:
             async with asyncio.timeout(OTHER_STEP_TIMEOUT):
                 message = f"<@{ctx.author.id}> Here's your image upscaled with `{model_name}`"
-                if model_name == "4x-UltraSharpV2":
-                    message = f"<@{ctx.author.id}> Here's your image upscaled with `{model_name}`\nPlease consider supporting Kim on [Ko-Fi](<https://ko-fi.com/kim20913944>) by buying a license for this model."
                 if has_alpha:
                     message += f" and alpha method `{alpha_handling}`"
                 if compression_info:
