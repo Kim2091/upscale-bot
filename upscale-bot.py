@@ -739,6 +739,8 @@ async def process_upscale(ctx, model_name, image, status_msg, alpha_handling, ha
                 message = f"<@{ctx.author.id}> Here's your image upscaled with `{model_name}`"
                 if has_alpha:
                     message += f" and alpha method `{alpha_handling}`"
+                if model_name == "4x-UltraSharpV2":
+                    message += f"\nPlease consider supporting Kim on [Ko-Fi](<https://ko-fi.com/kim20913944>) if you like this model!"
                 if compression_info:
                     message += f"\nNote: The image was saved as {save_format} with {compression_info} due to size limitations."
                 await ctx.send(message, file=discord.File(fp=output_buffer, filename=new_filename))
