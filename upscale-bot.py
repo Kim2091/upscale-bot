@@ -364,25 +364,30 @@ async def upscale(ctx, *args):
         model_name = args[0]
         image_url = None
         alpha_handling = None
+        unrecognized_tokens = []
 
-        if len(args) >= 1:
-            model_name = args[0]
-        if len(args) >= 2:
-            if args[1] in ['upscale', 'resize', 'discard']:
-                alpha_handling = args[1]
-                if len(args) >= 3:
-                    image_url = args[2]
-            elif args[1].startswith('http'):
-                image_url = args[1]
+        # Accept alpha handling and URL in any order after the model name
+        for token in args[1:]:
+            t = token.strip()
+            tl = t.lower()
+            if tl in ['upscale', 'resize', 'discard']:
+                alpha_handling = tl
+            elif t.startswith('http'):
+                image_url = t
             else:
-                await ctx.send(f"Invalid alpha handling option or image URL: {args[1]}. Using default alpha handling.")
-        if len(args) >= 3 and not image_url:
-            image_url = args[2]
-        
+                unrecognized_tokens.append(t)
+         
         if model_name is None:
             await ctx.send(help_text)
             bot.progress_logger.clear_step()
             return
+
+        # Retain informative message for unrecognized tokens
+        if unrecognized_tokens:
+            if alpha_handling is None:
+                await ctx.send(f"Invalid alpha handling option or image URL: {unrecognized_tokens[0]}. Using default alpha handling.")
+            else:
+                await ctx.send(f"Ignoring unrecognized option: {unrecognized_tokens[0]}")
 
         alpha_handling = alpha_handling if alpha_handling else DEFAULT_ALPHA_HANDLING
         if alpha_handling not in ['upscale', 'resize', 'discard']:
