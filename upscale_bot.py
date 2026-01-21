@@ -66,6 +66,14 @@ if 'Permissions' in config and 'DMAllowedUsers' in config['Permissions']:
     # Split by commas and convert to set of integers
     DM_ALLOWED_USERS = set(int(uid.strip()) for uid in config['Permissions']['DMAllowedUsers'].split(',') if uid.strip())
 
+# Whitelisted guild IDs where the bot can be used (REQUIRED)
+ALLOWED_GUILD_IDS = []
+if 'Discord' in config and 'AllowedGuildIds' in config['Discord']:
+    ALLOWED_GUILD_IDS = [int(gid.strip()) for gid in config['Discord']['AllowedGuildIds'].split(',') if gid.strip()]
+
+if not ALLOWED_GUILD_IDS:
+    raise ValueError("AllowedGuildIds must be set in config.ini - this bot only works in whitelisted servers")
+
 # Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
@@ -122,25 +130,7 @@ class UpscaleBot(commands.Bot):
     async def setup_hook(self):
         """Called when the bot is starting up"""
         logger.info("Setting up bot...")
-        
-        # Register slash commands
-        logger.info("Registering slash commands...")
-        
-        try:
-            # For global commands
-            logger.info("Syncing global commands...")
-            try:
-                await self.tree.sync()  # Attempt to sync globally
-                logger.info("Global commands synced successfully.")
-            except Exception as e:
-                logger.error(f"Failed to sync global commands: {e}")
-            
-            # Log all registered commands
-            commands = await self.tree.fetch_commands()
-            logger.info(f"Registered commands: {[cmd.name for cmd in commands]}")
-            
-        except Exception as e:
-            logger.error(f"Failed to sync command tree: {e}", exc_info=True)
+        # Commands will be synced in on_ready after all decorators are processed
 
     async def close(self):
         """Called when the bot is shutting down"""
@@ -362,60 +352,38 @@ async def model_autocomplete(
         model_names = models[:25]  # Discord limits to 25 choices
     return [app_commands.Choice(name=model, value=model) for model in model_names]
 
-# Initialize bot first
-bot = UpscaleBot(command_prefix=None, intents=intents)
+# Initialize bot first (using unused prefix since we only use slash commands)
+bot = UpscaleBot(command_prefix="!", intents=intents)
 
-# Then define sync_global command
-@bot.tree.command(description="Syncs your slash commands to the Discord API globally.")
-async def sync_global(interaction: discord.Interaction) -> None:
-    # Check if the user is the admin
-    if interaction.user.id != int(ADMIN_ID):
-        await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
-        return
-
-    await interaction.response.send_message("Syncing global commands...")
-    try:
-        await bot.tree.sync()
-        logger.info("Slash commands synced successfully.")
-        await interaction.followup.send("Slash commands synced successfully!")  # Send follow-up message
-    except Exception as e:
-        logger.error(f"Failed to sync global commands: {e}")
-        await interaction.followup.send("Failed to sync global commands. Please check the logs for more details.")
-
-# Define sync command for the current guild
-@bot.tree.command(description="Syncs commands to the current guild.")
+# Then define sync command - syncs to all whitelisted guilds
+@bot.tree.command(name="sync", description="Syncs commands to all whitelisted guilds.")
 async def sync(interaction: discord.Interaction) -> None:
-    logger.info(f"Sync command called by user: {interaction.user.id}")
-
     # Check if the user is the admin
     if interaction.user.id != int(ADMIN_ID):
         await interaction.response.send_message("You do not have permission to use this command.", ephemeral=True)
-        logger.warning(f"User {interaction.user.id} attempted to use sync command without permission.")
         return
 
-    # Acknowledge the interaction
     await interaction.response.defer(thinking=True)
-
-    guild_id = interaction.guild.id  # Get the current guild ID
-    test_guild = discord.Object(id=guild_id)  # Create a guild object for the current guild
-    logger.info(f"Clearing commands for guild: {test_guild.id}")
-
-    # Clear existing commands for the guild
-    bot.tree.clear_commands(guild=test_guild)
-
-    logger.info(f"Copying global commands to guild: {test_guild.id}")
     
-    # Copy global commands to the guild
-    bot.tree.copy_global_to(guild=test_guild)
-    logger.info("Syncing commands to guild...")
+    synced_guilds = []
+    failed_guilds = []
     
-    try:
-        await bot.tree.sync(guild=test_guild)
-        logger.info("Commands synced successfully to guild.")
-        await interaction.followup.send("Commands synced successfully to this guild!")  # Send follow-up message
-    except Exception as e:
-        logger.error(f"Failed to sync commands to guild: {e}")
-        await interaction.followup.send("Failed to sync commands to this guild. Please check the logs for more details.")
+    for guild_id in ALLOWED_GUILD_IDS:
+        try:
+            guild = discord.Object(id=guild_id)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            synced_guilds.append(f"{guild_id} ({len(synced)} commands)")
+            logger.info(f"Synced {len(synced)} commands to guild {guild_id}")
+        except Exception as e:
+            failed_guilds.append(f"{guild_id}: {e}")
+            logger.error(f"Failed to sync to guild {guild_id}: {e}")
+    
+    result = f"**Sync Complete**\n✅ Synced: {', '.join(synced_guilds) if synced_guilds else 'None'}"
+    if failed_guilds:
+        result += f"\n❌ Failed: {', '.join(failed_guilds)}"
+    
+    await interaction.followup.send(result)
 
 def can_use_dm(ctx):
     """Check if a user can use the bot in DMs"""
@@ -457,16 +425,22 @@ async def help_slash(interaction: discord.Interaction):
     )
     await interaction.response.send_message(help_text)
 
-# Global permissions check for slash commands
-@bot.check
-async def global_permissions(ctx):
-    """Global check for all commands"""
-    has_permission = can_use_dm(ctx)
-    if not has_permission:
-        if ctx.guild is None:  # Check if the context is a DM
-            await ctx.send("This bot can only be used in servers. If you need DM access, please contact the bot administrator.")
-        return False
-    return True
+# Global permissions check for slash commands - using tree's interaction_check
+@bot.tree.interaction_check
+async def global_interaction_check(interaction: discord.Interaction) -> bool:
+    """Global check for all slash commands"""
+    # If in a guild, always allow
+    if interaction.guild is not None:
+        return True
+    # In DM, check if user is allowed
+    if interaction.user.id in DM_ALLOWED_USERS:
+        return True
+    # Not allowed in DM
+    await interaction.response.send_message(
+        "This bot can only be used in servers. If you need DM access, please contact the bot administrator.",
+        ephemeral=True
+    )
+    return False
 
 # Model management
 def load_model(model_name):
@@ -522,18 +496,76 @@ async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
     logger.info("Note: This bot is configured to work only in servers, not in DMs.")
     
+    # Start background tasks
+    cleanup_task = bot.loop.create_task(bot.cleanup_models())
+    bot.tasks.append(cleanup_task)
+    
+    queue_task = bot.loop.create_task(bot.process_upscale_queue())
+    bot.tasks.append(queue_task)
+    
+    progress_task = bot.loop.create_task(bot.progress_logger.monitor_progress())
+    bot.tasks.append(progress_task)
+    
+    # Sync commands to whitelisted guilds only (no global commands)
+    try:
+        for guild_id in ALLOWED_GUILD_IDS:
+            try:
+                guild = discord.Object(id=guild_id)
+                bot.tree.copy_global_to(guild=guild)
+                synced = await bot.tree.sync(guild=guild)
+                logger.info(f"Synced {len(synced)} command(s) to guild {guild_id}: {[cmd.name for cmd in synced]}")
+            except Exception as e:
+                logger.error(f"Failed to sync commands to guild {guild_id}: {e}")
+        
+        # Clear any existing global commands
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        logger.info("Cleared global commands - bot only works in whitelisted guilds")
+    except Exception as e:
+        logger.error(f"Failed to sync commands on startup: {e}")
 
 
 @bot.event
 async def on_command_error(ctx, error):
+    # This handler is for legacy prefix commands, not slash commands
+    # Slash command errors are handled by tree.on_error or command-specific error handlers
     if isinstance(error, commands.CommandNotFound):
-        await ctx.send("Command not found. Use --upscale, --models, --resize, or --info")
-    elif isinstance(error, commands.CheckFailure):
-        # We've already sent a message in the global check, so just silently handle it
-        pass
-    # Let other errors propagate up
+        pass  # Silently ignore - slash commands don't trigger this
     else:
         raise error
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Global error handler for all slash commands"""
+    if isinstance(error, app_commands.CommandOnCooldown):
+        await interaction.response.send_message(
+            f"Command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            f"You don't have permission to use this command.",
+            ephemeral=True
+        )
+    elif isinstance(error, app_commands.CheckFailure):
+        # This handles global_interaction_check failures
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "You don't have permission to use this command.",
+                ephemeral=True
+            )
+    else:
+        logger.error(f"Unhandled app command error: {error}", exc_info=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"An error occurred: {str(error)}",
+                ephemeral=True
+            )
 
 @bot.tree.command(name="resize", description="Resize an image using specified scaling method")
 @app_commands.describe(
@@ -570,20 +602,6 @@ async def resize_slash(
             image_data = await image.read()
             img = Image.open(BytesIO(image_data))
             image_source_desc = f"attachment: {image.filename}"
-            
-            # Prepare input image details
-            file_size = len(image_data) / (1024 * 1024)  # Convert bytes to MB
-            resolution = f"{img.width}x{img.height}"
-            details_message = (
-                f"**Input Image Details:**\n"
-                f"**Name:** {image.filename}\n"
-                f"**Size:** {file_size:.2f} MB\n"
-                f"**Resolution:** {resolution}\n"
-                f"Here is your input image:"
-            )
-            
-            # Send the input image and details in one message
-            await interaction.followup.send(content=details_message, file=discord.File(fp=BytesIO(image_data), filename=image.filename))
         else:  # url
             img, error = await download_image(url)
             if error:
@@ -591,39 +609,38 @@ async def resize_slash(
                 return
             image_source_desc = "provided URL"
 
-            # Process the resize using the existing module
-            from utils.resize_module import resize_image, get_available_filters
+        # Process the resize using the existing module
+        from utils.resize_module import resize_image, get_available_filters
 
-            # Validate method
-            available_filters = get_available_filters()
-            if method.lower() not in available_filters:
-                filter_list = "\n".join(f"• {filter_name}" for filter_name in available_filters)
-                await interaction.followup.send(f"Unsupported method: {method}. Available methods are:\n{filter_list}")
-                return
+        # Validate method
+        available_filters = get_available_filters()
+        if method.lower() not in available_filters:
+            filter_list = "\n".join(f"• {filter_name}" for filter_name in available_filters)
+            await interaction.followup.send(f"Unsupported method: {method}. Available methods are:\n{filter_list}")
+            return
 
-            # Perform the resize
-            resized_image = resize_image(img, scale_factor, method, GAMMA_CORRECTION)
+        # Perform the resize
+        resized_image = resize_image(img, scale_factor, method, GAMMA_CORRECTION)
 
-            # Save and send the result
-            output_buffer = BytesIO()
-            resized_image.save(output_buffer, format='PNG')
-            output_buffer.seek(0)
+        # Save and send the result
+        output_buffer = BytesIO()
+        resized_image.save(output_buffer, format='PNG')
+        output_buffer.seek(0)
 
-            # Send the final result
-            operation = "upscaled" if scale_factor > 1 else "downscaled"
-            message = (
-                f"<@{interaction.user.id}> Here's your {operation} image\n"
-                f"Scale factor: {scale_factor}\n"
-                f"Method: {method}\n"
-                f"New size: {resized_image.size[0]}x{resized_image.size[1]}"
-            )
-            
-            await interaction.followup.send(message, file=discord.File(fp=output_buffer, filename=f"resized_{scale_factor}x.png"))
+        # Send the final result
+        operation = "upscaled" if scale_factor > 1 else "downscaled"
+        message = (
+            f"<@{interaction.user.id}> Here's your {operation} image\n"
+            f"Scale factor: {scale_factor}\n"
+            f"Method: {method}\n"
+            f"New size: {resized_image.size[0]}x{resized_image.size[1]}"
+        )
+        
+        await interaction.followup.send(message, file=discord.File(fp=output_buffer, filename=f"resized_{scale_factor}x.png"))
 
-        finally:
-            # Cleanup
-            await asyncio.sleep(5)
-            await status_msg.delete()
+        # Cleanup
+        await asyncio.sleep(5)
+        await status_msg.delete()
 
     except Exception as e:
         error_msg = f"Error during resize: {str(e)}"
@@ -738,8 +755,14 @@ async def info_slash(
         logger.error(error_msg, exc_info=True)
         await interaction.followup.send(error_msg)
 
-@app_commands.autocomplete(model=model_autocomplete)
 @bot.tree.command(name="upscale", description="Upscale an image using a specified model")
+@app_commands.describe(
+    model="The upscaling model to use",
+    image="The image file to upscale",
+    url="URL of the image to upscale",
+    alpha_handling="How to handle alpha/transparency"
+)
+@app_commands.autocomplete(model=model_autocomplete)
 async def upscale_slash(
     interaction: discord.Interaction, 
     model: str,
@@ -759,21 +782,31 @@ async def upscale_slash(
             await interaction.followup.send("Please provide either an image or a URL, not both.")
             return
 
-        # Create status message and start timing
-        start_time = time.time()
-        status_msg = await interaction.followup.send("Processing your request...")
-        
-        # Get the image
+        # Get the image first
         if image:
             image_data = await image.read()
             img = Image.open(BytesIO(image_data))
             image_source_desc = f"attachment: {image.filename}"
+            original_filename = image.filename
         else:  # url
             img, error = await download_image(url)
             if error:
-                await status_msg.edit(content=f"Error: {error}")
+                await interaction.followup.send(f"Error: {error}")
                 return
             image_source_desc = "provided URL"
+            original_filename = "original.png"
+        
+        # Save original image to send with status
+        original_buffer = BytesIO()
+        img.save(original_buffer, format='PNG')
+        original_buffer.seek(0)
+        
+        # Create status message with original image and start timing
+        start_time = time.time()
+        status_msg = await interaction.followup.send(
+            f"**Original image:**\nProcessing your request...",
+            file=discord.File(fp=original_buffer, filename=f"original_{original_filename}")
+        )
 
         # Load model and check input channels
         logger.info(f"Loading model: {model}")
@@ -834,18 +867,23 @@ async def upscale_slash(
         result.save(output_buffer, format='PNG')
         output_buffer.seek(0)
 
-        # Send the final result
-        message = f"<@{interaction.user.id}> Here's your image upscaled with `{model}`"
+        # Send the upscaled result
+        message = f"<@{interaction.user.id}> **Upscaled with `{model}`**"
         if has_alpha:
-            message += f" and alpha method `{alpha_mode}`"
+            message += f" (alpha: `{alpha_mode}`)"
         message += f"\nProcessing time: {upscale_time:.2f} seconds"
         
         await interaction.followup.send(message, file=discord.File(fp=output_buffer, filename=f"upscaled_{model}.png"))
-        await status_msg.edit(content=status_content + f"\nUpscale completed in {upscale_time:.2f} seconds\nImage sent successfully!")
+        
+        # Simplified final status
+        final_status = (
+            f"Processing image from {image_source_desc}\n"
+            f"Model: {model}\n"
+            f"Upscale completed in {upscale_time:.2f} seconds\n"
+            f"Image sent successfully!"
+        )
+        await status_msg.edit(content=final_status)
 
-        # Cleanup
-        await asyncio.sleep(5)
-        await status_msg.delete()
         bot.progress_logger.clear_step()
         logger.info("Upscale process completed successfully")
 
@@ -856,20 +894,6 @@ async def upscale_slash(
             await status_msg.edit(content=error_msg)
         else:
             await interaction.followup.send(error_msg)
-
-async def sync_commands():
-    """Sync commands to Discord API."""
-    try:
-        # Clear existing commands
-        existing_commands = await bot.tree.fetch_commands()
-        for command in existing_commands:
-            await bot.tree.delete_command(command.id)
-
-        # Sync new commands
-        await bot.tree.sync()
-        logger.info("Commands synced successfully.")
-    except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
 
 # Main execution
 if __name__ == "__main__":
