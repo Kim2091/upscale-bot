@@ -404,10 +404,8 @@ async def help_slash(interaction: discord.Interaction):
         "     - `url`: URL of the image to upscale (optional).\n"
         "     - `alpha_handling`: How to handle alpha/transparency (options: `resize`, `upscale`, `discard`).\n\n"
         
-        "2. **/models**\n"
-        "   - **Description**: List available upscaling models.\n"
-        "   - **Parameters**:\n"
-        "     - `search_term`: Optional term to filter models by name.\n\n"
+        "2. **/models_list**\n"
+        "   - **Description**: List available upscaling models.\n\n"
         
         "3. **/resize**\n"
         "   - **Description**: Resize an image using specified scaling method.\n"
@@ -650,22 +648,12 @@ async def resize_slash(
         else:
             await interaction.followup.send(error_msg)
 
-@bot.tree.command(name="models", description="List available upscaling models")
-@app_commands.describe(search_term="Optional term to filter models by name")
-async def models_slash(interaction: discord.Interaction, search_term: Optional[str] = None):
-    """List available upscaling models, optionally filtered by search term"""
-    available_models = bot.list_available_models(search_term)
+@bot.tree.command(name="models_list", description="List available upscaling models")
+async def models_slash(interaction: discord.Interaction):
+    """List available upscaling models"""
+    available_models = bot.list_available_models(None)
     if not available_models:
-        await interaction.response.send_message("No models are currently available.")
-        return
-
-    if search_term:
-        matches = search_models(search_term, available_models)
-        if matches:
-            match_list = "\n".join(f"{match[0]} (similarity: {match[1]}%)" for match in matches)
-            await interaction.response.send_message(f"Models matching '{search_term}':\n```\n{match_list}\n```")
-        else:
-            await interaction.response.send_message(f"No models found matching '{search_term}'.")
+        await interaction.response.send_message("No models are currently available.", ephemeral=True)
         return
 
     # Sort the models alphabetically
@@ -682,17 +670,17 @@ async def models_slash(interaction: discord.Interaction, search_term: Optional[s
     first_chunk = model_chunks[0]
     model_list = "\n".join(first_chunk)
     initial_message = f"Available models (Page 1/{len(model_chunks)}):\n```\n{model_list}\n```"
-    await interaction.response.send_message(initial_message)
+    await interaction.response.send_message(initial_message, ephemeral=True)
     
     # Send remaining chunks as follow-up messages
     for i, chunk in enumerate(model_chunks[1:], 2):
         model_list = "\n".join(chunk)
         message = f"Available models (Page {i}/{len(model_chunks)}):\n```\n{model_list}\n```"
-        await interaction.followup.send(message)
+        await interaction.followup.send(message, ephemeral=True)
     
     # If there are multiple pages, send a summary message
     if len(model_chunks) > 1:
-        await interaction.followup.send(f"Total number of available models: {len(available_models)}")
+        await interaction.followup.send(f"Total number of available models: {len(available_models)}", ephemeral=True)
 
 @bot.tree.command(name="info", description="Get information about an image")
 @app_commands.describe(
@@ -877,10 +865,12 @@ async def upscale_slash(
         
         # Simplified final status
         final_status = (
-            f"Processing image from {image_source_desc}\n"
+            f"Source: {image_source_desc}\n"
             f"Model: {model}\n"
             f"Upscale completed in {upscale_time:.2f} seconds\n"
-            f"Image sent successfully!"
+            f"Image sent successfully!\n"
+            f"**Original image:**"
+
         )
         await status_msg.edit(content=final_status)
 
