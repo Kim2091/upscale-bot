@@ -604,35 +604,59 @@ async def on_command_error(ctx, error):
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Global error handler for all slash commands"""
-    if isinstance(error, app_commands.CommandOnCooldown):
-        await interaction.response.send_message(
-            f"Command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
-            ephemeral=True
-        )
-    elif isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message(
-            f"You don't have permission to use this command.",
-            ephemeral=True
-        )
-    elif isinstance(error, app_commands.CheckFailure):
-        # This handles global_interaction_check failures
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "You don't have permission to use this command.",
-                ephemeral=True
-            )
-    else:
-        logger.error(f"Unhandled app command error: {error}", exc_info=True)
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                f"An error occurred: {str(error)}",
-                ephemeral=True
-            )
+    try:
+        if isinstance(error, app_commands.CommandOnCooldown):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"Command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Command is on cooldown. Try again in {error.retry_after:.2f} seconds.",
+                    ephemeral=True
+                )
+        elif isinstance(error, app_commands.MissingPermissions):
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"You don't have permission to use this command.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"You don't have permission to use this command.",
+                    ephemeral=True
+                )
+        elif isinstance(error, app_commands.CheckFailure):
+            # This handles global_interaction_check failures
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "You don't have permission to use this command.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    "You don't have permission to use this command.",
+                    ephemeral=True
+                )
         else:
-            await interaction.followup.send(
-                f"An error occurred: {str(error)}",
-                ephemeral=True
-            )
+            logger.error(f"Unhandled app command error: {error}", exc_info=True)
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    f"An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"An error occurred: {str(error)}",
+                    ephemeral=True
+                )
+    except discord.errors.NotFound:
+        # Interaction expired or already acknowledged - just log the error
+        logger.error(f"Could not respond to interaction (expired/invalid): {error}", exc_info=True)
+    except Exception as e:
+        # Catch any other errors in the error handler itself
+        logger.error(f"Error in error handler: {e}", exc_info=True)
 
 @bot.tree.command(name="resize", description="Resize an image using specified scaling method")
 @app_commands.describe(
