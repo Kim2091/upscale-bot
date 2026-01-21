@@ -38,12 +38,22 @@ A Discord bot that performs image upscaling using various super-resolution model
    ```
 4. Install [ImageMagick](https://imagemagick.org/script/download.php)
 
-5. Open the `config.ini` file in the project root directory and replace `YOUR_DISCORD_BOT_TOKEN` and `YOUR_DISCORD_USER_ID` with your actual Discord bot token and user ID. Set this up at https://discord.com/developers/
-     - The bot needs the `bot` scope (and maybe `applications.commands`), then:
-       - Send Messages
-       - Attach Files
-       - View Channels
-       - Use Slash Commands (maybe)
+5. Open the `config.ini` file in the project root directory and configure the following **required** settings:
+   
+   - `Token`: Your Discord bot token from https://discord.com/developers/
+   - `AdminId`: Your Discord user ID (for admin commands and error notifications)
+   - `AllowedGuildIds`: **REQUIRED** - Comma-separated list of Discord server (guild) IDs where the bot can be used
+     - The bot will **only** work in these whitelisted servers
+     - To find a server's ID: Enable Developer Mode in Discord (User Settings > Advanced > Developer Mode), then right-click the server icon and select "Copy Server ID"
+     - Example: `AllowedGuildIds = 123456789012345678, 987654321098765432`
+   - `ModelPath`: Path to the folder containing your upscaling models
+   
+   Discord Bot Setup:
+   - The bot needs the `bot` scope (and maybe `applications.commands`), then:
+     - Send Messages
+     - Attach Files
+     - View Channels
+     - Use Slash Commands
 
 6. Place your models (.pth or .safetensors files) in the directory specified by `ModelPath` in the config file.
 
