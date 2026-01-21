@@ -7,8 +7,29 @@ def handle_alpha(image, upscale_func, alpha_handling, gamma_correction):
     if alpha_handling == 'discard':
         return upscale_func(image.convert('RGB'))
 
+    # Validate alpha_handling parameter
+    if alpha_handling not in ('resize', 'upscale', 'discard'):
+        raise ValueError(f"Invalid alpha_handling mode: {alpha_handling}. Must be 'resize', 'upscale', or 'discard'.")
+
+    # Extract alpha channel based on image mode
+    if image.mode == 'LA':
+        # LA mode: Luminance + Alpha (2 channels)
+        alpha = image.split()[1]
+    elif image.mode == 'P' and 'transparency' in image.info:
+        # Palette mode with transparency - convert to RGBA first
+        alpha = image.convert('RGBA').split()[3]
+    elif image.mode == 'RGBA':
+        # Standard RGBA mode
+        alpha = image.split()[3]
+    else:
+        # Fallback: try to convert to RGBA and extract alpha
+        try:
+            alpha = image.convert('RGBA').split()[3]
+        except (IndexError, ValueError) as e:
+            raise ValueError(f"Unable to extract alpha channel from image mode '{image.mode}': {e}")
+
     # Convert image to RGB
-    rgb_image, alpha = image.convert('RGB'), image.split()[3]
+    rgb_image = image.convert('RGB')
 
     # Upscale RGB Portion
     upscaled_rgb = upscale_func(rgb_image)

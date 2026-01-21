@@ -1,13 +1,16 @@
 # Standard library imports
 import asyncio
 import configparser
+import functools
 import gc
 import os
+import tempfile
 import time
 from io import BytesIO
 import logging
 from logging.handlers import RotatingFileHandler
 from typing import Optional, Literal
+from urllib.parse import urlparse
 
 # Third-party library imports
 import aiohttp
@@ -115,6 +118,7 @@ class UpscaleBot(commands.Bot):
         self.upscale_queue = asyncio.Queue()
         self.upscale_semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPSCALES)
         self.models = {}
+        self.model_load_lock = asyncio.Lock()  # Thread-safe model loading
         self.last_cleanup_time = time.time()
         self.model_path = MODEL_PATH
         self.default_alpha_handling = DEFAULT_ALPHA_HANDLING
@@ -205,10 +209,11 @@ class UpscaleBot(commands.Bot):
                     return
                 image_source_desc = "provided URL"
 
-            # Load model and check input channels
+            # Load model and check input channels (now async)
             logger.info(f"Loading model: {model_name}")
-            model = load_model(model_name)
+            model = await load_model(model_name)
             if model.input_channels == 4:
+                image.close()  # Clean up
                 await status_msg.edit(content="4 channel models are not supported, please pick another model.")
                 return
 
@@ -253,7 +258,15 @@ class UpscaleBot(commands.Bot):
                 return False
 
             self.progress_logger.log_step("Starting upscale process")
-            result = self.upscale_image(image, model, adjusted_tile_size, alpha_handling, has_alpha, PRECISION, check_cancelled)
+            # Run blocking GPU upscale in thread pool to avoid blocking event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                functools.partial(
+                    self.upscale_image, image, model, adjusted_tile_size, 
+                    alpha_handling, has_alpha, PRECISION, check_cancelled
+                )
+            )
             
             # Calculate upscale time before saving
             upscale_time = time.time() - start_time
@@ -353,7 +366,7 @@ async def model_autocomplete(
     return [app_commands.Choice(name=model, value=model) for model in model_names]
 
 # Initialize bot first (using unused prefix since we only use slash commands)
-bot = UpscaleBot(command_prefix="!", intents=intents)
+bot = UpscaleBot(command_prefix="--", intents=intents)
 
 # Then define sync command - syncs to all whitelisted guilds
 @bot.tree.command(name="sync", description="Syncs commands to all whitelisted guilds.")
@@ -385,43 +398,56 @@ async def sync(interaction: discord.Interaction) -> None:
     
     await interaction.followup.send(result)
 
+# Help text constant for reuse
+HELP_TEXT = (
+    "**Available Commands:**\n\n"
+    "1. **/upscale**\n"
+    "   - **Description**: Upscale an image using a specified model.\n"
+    "   - **Parameters**:\n"
+    "     - `model`: The upscaling model to use (required).\n"
+    "     - `image`: The image file to upscale (optional).\n"
+    "     - `url`: URL of the image to upscale (optional).\n"
+    "     - `alpha_handling`: How to handle alpha/transparency (options: `resize`, `upscale`, `discard`).\n\n"
+    
+    "2. **/models_list**\n"
+    "   - **Description**: List available upscaling models.\n\n"
+    
+    "3. **/resize**\n"
+    "   - **Description**: Resize an image using specified scaling method.\n"
+    "   - **Parameters**:\n"
+    "     - `scale_factor`: Scale factor for resizing (e.g., `2.0` for 2x) (required).\n"
+    "     - `method`: The resizing method to use (e.g., `lanczos`, `bicubic`) (optional, default: `lanczos`).\n"
+    "     - `image`: The image file to resize (optional).\n"
+    "     - `url`: URL of the image to resize (optional).\n\n"
+    
+    "4. **/info**\n"
+    "   - **Description**: Get information about an image.\n"
+    "   - **Parameters**:\n"
+    "     - `image`: The image file to analyze (optional).\n"
+    "     - `url`: URL of the image to analyze (optional).\n"
+)
+
 def can_use_dm(ctx):
     """Check if a user can use the bot in DMs"""
     if ctx.guild is not None:  # If in a guild, always allow
         return True
     return ctx.author.id in DM_ALLOWED_USERS  # In DM, check if user is allowed
 
+@bot.command(name='upscale')
+async def upscale_legacy(ctx):
+    """Legacy command handler to inform users about slash commands"""
+    message = (
+        "⚠️ **This bot now uses slash commands!**\n\n"
+        "The old prefix commands like `--upscale` are no longer supported.\n"
+        "Please use the new slash commands instead. Type `/` to see available commands.\n\n"
+        f"{HELP_TEXT}"
+    )
+    await ctx.send(message)
+
 @bot.tree.command(name="help", description="Show help information for the bot")
 async def help_slash(interaction: discord.Interaction):
     """Send help information for the bot."""
-    help_text = (
-        "**Available Commands:**\n\n"
-        "1. **/upscale**\n"
-        "   - **Description**: Upscale an image using a specified model.\n"
-        "   - **Parameters**:\n"
-        "     - `model`: The upscaling model to use (required).\n"
-        "     - `image`: The image file to upscale (optional).\n"
-        "     - `url`: URL of the image to upscale (optional).\n"
-        "     - `alpha_handling`: How to handle alpha/transparency (options: `resize`, `upscale`, `discard`).\n\n"
-        
-        "2. **/models_list**\n"
-        "   - **Description**: List available upscaling models.\n\n"
-        
-        "3. **/resize**\n"
-        "   - **Description**: Resize an image using specified scaling method.\n"
-        "   - **Parameters**:\n"
-        "     - `scale_factor`: Scale factor for resizing (e.g., `2.0` for 2x) (required).\n"
-        "     - `method`: The resizing method to use (e.g., `lanczos`, `bicubic`) (optional, default: `lanczos`).\n"
-        "     - `image`: The image file to resize (optional).\n"
-        "     - `url`: URL of the image to resize (optional).\n\n"
-        
-        "4. **/info**\n"
-        "   - **Description**: Get information about an image.\n"
-        "   - **Parameters**:\n"
-        "     - `image`: The image file to analyze (optional).\n"
-        "     - `url`: URL of the image to analyze (optional).\n"
-    )
-    await interaction.response.send_message(help_text)
+    await interaction.response.send_message(HELP_TEXT, ephemeral=True)
 
 # Global permissions check for slash commands - using tree's interaction_check
 @bot.tree.interaction_check
@@ -441,52 +467,95 @@ async def global_interaction_check(interaction: discord.Interaction) -> bool:
     return False
 
 # Model management
-def load_model(model_name):
+async def load_model(model_name):
+    """Load a model with thread-safe locking to prevent race conditions."""
+    # Quick check without lock first
     if model_name in bot.models:
         return bot.models[model_name]
     
-    # Check for both .pth and .safetensors files
-    pth_path = os.path.join(MODEL_PATH, f"{model_name}.pth")
-    safetensors_path = os.path.join(MODEL_PATH, f"{model_name}.safetensors")
-    
-    if os.path.exists(pth_path):
-        model_path = pth_path
-    elif os.path.exists(safetensors_path):
-        model_path = safetensors_path
-    else:
-        raise ValueError(f"Model file not found: {model_name}")
-    
-    try:
-        model = spandrel.ModelLoader().load_from_file(model_path)
-        if isinstance(model, spandrel.ImageModelDescriptor):
-            bot.models[model_name] = model.cuda().eval()
-            logger.info(f"Loaded model: {model_name}")
+    # Acquire lock for loading
+    async with bot.model_load_lock:
+        # Double-check after acquiring lock (another request might have loaded it)
+        if model_name in bot.models:
             return bot.models[model_name]
+        
+        # Check for both .pth and .safetensors files
+        pth_path = os.path.join(MODEL_PATH, f"{model_name}.pth")
+        safetensors_path = os.path.join(MODEL_PATH, f"{model_name}.safetensors")
+        
+        if os.path.exists(pth_path):
+            model_path = pth_path
+        elif os.path.exists(safetensors_path):
+            model_path = safetensors_path
         else:
-            raise ValueError(f"Invalid model type for {model_name}")
-    except Exception as e:
-        logger.error(f"Failed to load model {model_name}: {str(e)}")
-        raise
+            raise ValueError(f"Model file not found: {model_name}")
+        
+        try:
+            # Run blocking model loading in thread pool
+            loop = asyncio.get_event_loop()
+            model = await loop.run_in_executor(
+                None,
+                lambda: spandrel.ModelLoader().load_from_file(model_path)
+            )
+            if isinstance(model, spandrel.ImageModelDescriptor):
+                bot.models[model_name] = model.cuda().eval()
+                logger.info(f"Loaded model: {model_name}")
+                return bot.models[model_name]
+            else:
+                raise ValueError(f"Invalid model type for {model_name}")
+        except Exception as e:
+            logger.error(f"Failed to load model {model_name}: {str(e)}")
+            raise
 
 # Image processing functions
+MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50MB max image size
+DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
+
 async def download_image(url):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                return None, "Failed to download the image."
-            data = await resp.read()
-            
-            try:
-                image = Image.open(BytesIO(data))
+    """Download an image from URL with validation, timeout, and size limits."""
+    # Validate URL scheme to prevent SSRF attacks
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https'):
+        return None, "Invalid URL scheme. Only HTTP and HTTPS are allowed."
+    
+    # Block common internal network patterns
+    hostname = parsed.hostname or ''
+    if hostname in ('localhost', '127.0.0.1', '0.0.0.0') or hostname.startswith('192.168.') or hostname.startswith('10.') or hostname.startswith('172.'):
+        return None, "URLs pointing to internal networks are not allowed."
+    
+    try:
+        async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None, f"Failed to download the image. Server returned status {resp.status}."
                 
-                if image.format.lower() not in ['jpeg', 'png', 'gif', 'webp']:
-                    return None, "The URL does not point to a supported image format. Supported formats are JPEG, PNG, GIF, and WebP."
+                # Check content length before downloading
+                content_length = resp.headers.get('Content-Length')
+                if content_length and int(content_length) > MAX_IMAGE_SIZE:
+                    return None, f"Image is too large. Maximum size is {MAX_IMAGE_SIZE // (1024*1024)}MB."
                 
-                return image, None
-            except UnidentifiedImageError:
-                return None, "The URL does not point to a valid image file."
-            except Exception as e:
-                return None, f"Error processing the image: {str(e)}"
+                # Read with size limit
+                data = b''
+                async for chunk in resp.content.iter_chunked(8192):
+                    data += chunk
+                    if len(data) > MAX_IMAGE_SIZE:
+                        return None, f"Image is too large. Maximum size is {MAX_IMAGE_SIZE // (1024*1024)}MB."
+                
+                try:
+                    image = Image.open(BytesIO(data))
+                    
+                    if image.format and image.format.lower() not in ['jpeg', 'png', 'gif', 'webp']:
+                        return None, "The URL does not point to a supported image format. Supported formats are JPEG, PNG, GIF, and WebP."
+                    
+                    return image, None
+                except UnidentifiedImageError:
+                    return None, "The URL does not point to a valid image file."
+                except Exception as e:
+                    return None, f"Error processing the image: {str(e)}"
+    except asyncio.TimeoutError:
+        return None, "Download timed out. Please try again or use a different image."
+    except aiohttp.ClientError as e:
+        return None, f"Network error while downloading image: {str(e)}"
 
 # Bot event handlers
 @bot.event
@@ -568,16 +637,16 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 @bot.tree.command(name="resize", description="Resize an image using specified scaling method")
 @app_commands.describe(
     scale_factor="Scale factor for resizing (e.g., 2.0 for 2x)",
-    method="The resizing method to use",
     image="The image file to resize",
-    url="URL of the image to resize"
+    url="URL of the image to resize",
+    method="The resizing method to use"
 )
 async def resize_slash(
     interaction: discord.Interaction, 
     scale_factor: float,
-    method: str = "box",
     image: Optional[discord.Attachment] = None,
-    url: Optional[str] = None
+    url: Optional[str] = None,
+    method: Literal["nearest", "box", "linear", "hermite", "hamming", "hann", "lanczos", "catrom", "mitchell", "bspline", "lagrange", "gauss"] = "box"
 ):
     """Resize an image using specified scaling method"""
     await interaction.response.defer()
@@ -591,21 +660,31 @@ async def resize_slash(
             await interaction.followup.send("Please provide either an image or a URL, not both.")
             return
 
-        # Create status message and start timing
-        start_time = time.time()
-        status_msg = await interaction.followup.send("Processing your request...")
-        
         # Get the image
         if image:
             image_data = await image.read()
             img = Image.open(BytesIO(image_data))
             image_source_desc = f"attachment: {image.filename}"
+            original_filename = image.filename
         else:  # url
             img, error = await download_image(url)
             if error:
-                await status_msg.edit(content=f"Error: {error}")
+                await interaction.followup.send(f"Error: {error}")
                 return
             image_source_desc = "provided URL"
+            original_filename = "original.png"
+
+        # Save original image to send with status
+        original_buffer = BytesIO()
+        img.save(original_buffer, format='PNG')
+        original_buffer.seek(0)
+
+        # Create status message with original image and start timing
+        start_time = time.time()
+        status_msg = await interaction.followup.send(
+            "**Original image:**\nProcessing your request...",
+            file=discord.File(fp=original_buffer, filename=f"original_{original_filename}")
+        )
 
         # Process the resize using the existing module
         from utils.resize_module import resize_image, get_available_filters
@@ -613,12 +692,14 @@ async def resize_slash(
         # Validate method
         available_filters = get_available_filters()
         if method.lower() not in available_filters:
+            img.close()  # Clean up image
             filter_list = "\n".join(f"• {filter_name}" for filter_name in available_filters)
             await interaction.followup.send(f"Unsupported method: {method}. Available methods are:\n{filter_list}")
             return
 
         # Perform the resize
         resized_image = resize_image(img, scale_factor, method, GAMMA_CORRECTION)
+        img.close()  # Clean up input image after processing
 
         # Save and send the result
         output_buffer = BytesIO()
@@ -636,9 +717,15 @@ async def resize_slash(
         
         await interaction.followup.send(message, file=discord.File(fp=output_buffer, filename=f"resized_{scale_factor}x.png"))
 
-        # Cleanup
-        await asyncio.sleep(5)
-        await status_msg.delete()
+        # Update status to show completion
+        final_status = (
+            f"Source: {image_source_desc}\n"
+            f"Scale factor: {scale_factor}\n"
+            f"Method: {method}\n"
+            f"Resize completed successfully!\n"
+            f"**Original Image:**"
+        )
+        await status_msg.edit(content=final_status)
 
     except Exception as e:
         error_msg = f"Error during resize: {str(e)}"
@@ -704,39 +791,60 @@ async def info_slash(
             await interaction.followup.send("Please provide either an image or a URL, not both.")
             return
 
-        # Create a temporary file to store the image
-        temp_filename = None
+        # Create a temporary file to store the image securely
+        temp_file = None
+        original_buffer = None
         try:
             if image:
-                # Download the attachment
+                # Download the attachment and write to secure temp file
                 image_data = await image.read()
-                temp_filename = image.filename
-                with open(temp_filename, 'wb') as f:
-                    f.write(image_data)
+                # Get file extension from original filename
+                _, ext = os.path.splitext(image.filename)
+                temp_file = tempfile.NamedTemporaryFile(suffix=ext or '.png', delete=False)
+                temp_file.write(image_data)
+                temp_file.close()
+                temp_filename = temp_file.name
+                original_filename = image.filename
+                # Save original for display
+                original_buffer = BytesIO(image_data)
             else:
-                # Download from URL
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(url) as resp:
-                        if resp.status == 200:
-                            temp_filename = 'temp_image'
-                            content = await resp.read()
-                            with open(temp_filename, 'wb') as f:
-                                f.write(content)
-                        else:
-                            await interaction.followup.send("Failed to download the image.")
-                            return
+                # Download from URL with timeout
+                try:
+                    async with aiohttp.ClientSession(timeout=DOWNLOAD_TIMEOUT) as session:
+                        async with session.get(url) as resp:
+                            if resp.status == 200:
+                                content = await resp.read()
+                                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                                temp_file.write(content)
+                                temp_file.close()
+                                temp_filename = temp_file.name
+                                original_filename = "image.png"
+                                # Save original for display
+                                original_buffer = BytesIO(content)
+                            else:
+                                await interaction.followup.send("Failed to download the image.")
+                                return
+                except asyncio.TimeoutError:
+                    await interaction.followup.send("Download timed out. Please try again.")
+                    return
 
             # Get and format the image info
             image_info = get_image_info(temp_filename)
             formatted_info = format_image_info(image_info)
 
-            # Send the formatted info
-            await interaction.followup.send(f"```\n{formatted_info}\n```")
+            # Send the formatted info with original image
+            await interaction.followup.send(
+                f"**Original image:**\n```\n{formatted_info}\n```",
+                file=discord.File(fp=original_buffer, filename=f"original_{original_filename}")
+            )
 
         finally:
-            # Clean up the temporary file
-            if temp_filename and os.path.exists(temp_filename):
-                os.remove(temp_filename)
+            # Clean up the temporary file securely
+            if temp_file and os.path.exists(temp_file.name):
+                try:
+                    os.unlink(temp_file.name)
+                except OSError:
+                    pass  # Ignore cleanup errors
 
     except Exception as e:
         error_msg = f"Error getting image info: {str(e)}"
@@ -796,10 +904,11 @@ async def upscale_slash(
             file=discord.File(fp=original_buffer, filename=f"original_{original_filename}")
         )
 
-        # Load model and check input channels
+        # Load model and check input channels (now async)
         logger.info(f"Loading model: {model}")
-        model_obj = load_model(model)
+        model_obj = await load_model(model)
         if model_obj.input_channels == 4:
+            img.close()  # Clean up image
             await status_msg.edit(content="4 channel models are not supported, please pick another model.")
             return
 
@@ -840,9 +949,19 @@ async def upscale_slash(
             status_content += f"\nAlpha handling: {alpha_mode}"
         await status_msg.edit(content=status_content + "\nStarting upscale process...")
 
-        # Process the image
+        # Process the image - run blocking GPU code in thread pool
         bot.progress_logger.log_step("Starting upscale process")
-        result = bot.upscale_image(img, model_obj, adjusted_tile_size, alpha_mode, has_alpha, PRECISION, lambda: False)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(
+                bot.upscale_image, img, model_obj, adjusted_tile_size, 
+                alpha_mode, has_alpha, PRECISION, lambda: False
+            )
+        )
+        
+        # Clean up input image after processing
+        img.close()
         
         # Calculate processing time
         upscale_time = time.time() - start_time
