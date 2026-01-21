@@ -20,6 +20,7 @@ A Discord bot that performs image upscaling using various super-resolution model
 - CUDA-capable GPU
 - Discord Bot Token
 - Terminal program `nvidia-smi` installed on your system
+- [ImageMagick](https://imagemagick.org/script/download.php)
 
 ## Installation
 
