@@ -557,6 +557,72 @@ async def download_image(url):
     except aiohttp.ClientError as e:
         return None, f"Network error while downloading image: {str(e)}"
 
+# Image compression functions
+MAX_DISCORD_FILE_SIZE = 10 * 1024 * 1024  # 10 MB in bytes
+
+def estimate_file_size(img, format, **params):
+    """Estimate file size by saving to a temporary buffer."""
+    temp_buffer = BytesIO()
+    img.save(temp_buffer, format=format, **params)
+    return temp_buffer.tell()
+
+def find_webp_quality(img, max_size):
+    """Binary search to find the highest WebP quality that stays under max_size."""
+    low, high = 1, 100
+    while low <= high:
+        mid = (low + high) // 2
+        size = estimate_file_size(img, 'WEBP', quality=mid)
+        if size < max_size:
+            low = mid + 1
+        else:
+            high = mid - 1
+    return high
+
+async def compress_image_for_discord(img, base_filename, max_size=MAX_DISCORD_FILE_SIZE):
+    """
+    Compress an image to fit within Discord's file size limit.
+    Returns (buffer, filename, format_info, compression_info)
+    """
+    loop = asyncio.get_event_loop()
+    output_buffer = BytesIO()
+    filename_parts = os.path.splitext(base_filename)
+    compression_info = None
+    
+    # Try PNG first
+    try:
+        await loop.run_in_executor(None, lambda: img.save(output_buffer, 'PNG'))
+        if output_buffer.tell() <= max_size:
+            output_buffer.seek(0)
+            return output_buffer, f"{filename_parts[0]}.png", 'PNG', None
+    except Exception as e:
+        logger.debug(f"PNG save failed: {e}")
+    
+    # Reset buffer and try WebP lossless
+    output_buffer.seek(0)
+    output_buffer.truncate(0)
+    try:
+        await loop.run_in_executor(None, lambda: img.save(output_buffer, 'WEBP', lossless=True))
+        if output_buffer.tell() <= max_size:
+            output_buffer.seek(0)
+            return output_buffer, f"{filename_parts[0]}.webp", 'WEBP (lossless)', None
+    except Exception as e:
+        logger.debug(f"WebP lossless save failed: {e}")
+    
+    # Reset buffer and try WebP lossy with quality search
+    output_buffer.seek(0)
+    output_buffer.truncate(0)
+    try:
+        webp_quality = await loop.run_in_executor(None, find_webp_quality, img, max_size)
+        if webp_quality < 1:
+            raise Exception("Cannot compress image small enough")
+        await loop.run_in_executor(None, lambda: img.save(output_buffer, 'WEBP', quality=webp_quality))
+        output_buffer.seek(0)
+        compression_info = f"lossy (quality {webp_quality})"
+        return output_buffer, f"{filename_parts[0]}.webp", 'WEBP', compression_info
+    except Exception as e:
+        logger.error(f"WebP lossy save failed: {e}")
+        raise Exception("Unable to compress image to under 10 MB")
+
 # Bot event handlers
 @bot.event
 async def on_ready():
@@ -919,13 +985,26 @@ async def upscale_slash(
         # Save original image to send with status
         original_buffer = BytesIO()
         img.save(original_buffer, format='PNG')
+        original_file_size = original_buffer.tell()
+        
+        # Reject images that are too large
+        if original_file_size > MAX_DISCORD_FILE_SIZE:
+            img.close()
+            await interaction.followup.send(
+                f"Error: The original image is too large ({original_file_size / (1024*1024):.2f}MB). "
+                f"Maximum size is {MAX_DISCORD_FILE_SIZE // (1024*1024)}MB. "
+                f"Please resize the image before uploading."
+            )
+            return
+        
         original_buffer.seek(0)
+        original_send_filename = f"original_{original_filename}"
         
         # Create status message with original image and start timing
         start_time = time.time()
         status_msg = await interaction.followup.send(
             f"**Original image:**\nProcessing your request...",
-            file=discord.File(fp=original_buffer, filename=f"original_{original_filename}")
+            file=discord.File(fp=original_buffer, filename=original_send_filename)
         )
 
         # Load model and check input channels (now async)
@@ -992,25 +1071,52 @@ async def upscale_slash(
         logger.info(f"Upscale completed in {upscale_time:.2f} seconds")
         await status_msg.edit(content=status_content + f"\nUpscale completed in {upscale_time:.2f} seconds\nSaving image...")
 
-        # Save and send the result
-        bot.progress_logger.log_step("Saving and sending upscaled image")
+        # Save and send the result (with compression if needed)
+        bot.progress_logger.log_step("Saving and compressing upscaled image")
+        await status_msg.edit(content=status_content + f"\nUpscale completed in {upscale_time:.2f} seconds\nCompressing...")
+        
+        compression_start_time = time.time()
         output_buffer = BytesIO()
         result.save(output_buffer, format='PNG')
-        output_buffer.seek(0)
+        output_file_size = output_buffer.tell()
+        
+        save_format = 'PNG'
+        output_filename = f"upscaled_{model}.png"
+        compression_info = None
+        
+        if output_file_size > MAX_DISCORD_FILE_SIZE:
+            logger.info(f"Upscaled image exceeds {MAX_DISCORD_FILE_SIZE // (1024*1024)}MB ({output_file_size / (1024*1024):.2f}MB), compressing...")
+            output_buffer, output_filename, save_format, compression_info = await compress_image_for_discord(
+                result, f"upscaled_{model}"
+            )
+        else:
+            output_buffer.seek(0)
+        
+        compression_time = time.time() - compression_start_time
+        file_size_mb = output_buffer.getbuffer().nbytes / (1024 * 1024)
+        
+        log_message = f"Image saved in {compression_time:.2f} seconds as {save_format}"
+        if compression_info:
+            log_message += f" with {compression_info}"
+        log_message += f", size: {file_size_mb:.2f} MB"
+        logger.info(log_message)
 
         # Send the upscaled result
         message = f"<@{interaction.user.id}> **Upscaled with `{model}`**"
         if has_alpha:
             message += f" (alpha: `{alpha_mode}`)"
         message += f"\nProcessing time: {upscale_time:.2f} seconds"
+        if compression_info:
+            message += f"\nNote: Saved as {save_format} with {compression_info} due to size limitations."
         
-        await interaction.followup.send(message, file=discord.File(fp=output_buffer, filename=f"upscaled_{model}.png"))
+        await interaction.followup.send(message, file=discord.File(fp=output_buffer, filename=output_filename))
         
         # Simplified final status
         final_status = (
             f"Source: {image_source_desc}\n"
             f"Model: {model}\n"
             f"Upscale completed in {upscale_time:.2f} seconds\n"
+            f"Compression completed in {compression_time:.2f} seconds\n"
             f"Image sent successfully!\n"
             f"**Original image:**"
 
@@ -1020,13 +1126,64 @@ async def upscale_slash(
         bot.progress_logger.clear_step()
         logger.info("Upscale process completed successfully")
 
+    except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        bot.progress_logger.clear_step()
+        error_str = str(e)
+        is_cuda_error = "CUDA" in error_str or "out of memory" in error_str.lower()
+        
+        if is_cuda_error:
+            error_message = f"<@{ADMIN_ID}> Critical CUDA error occurred: {error_str}"
+            logger.error(error_message, exc_info=True)
+            
+            # Try to recover by clearing CUDA cache
+            try:
+                torch.cuda.empty_cache()
+                gc.collect()
+                bot.models.clear()  # Clear cached models
+                logger.info("Cleared CUDA cache and models after error")
+            except Exception as cleanup_error:
+                logger.error(f"Error during CUDA cleanup: {cleanup_error}")
+            
+            if 'status_msg' in locals():
+                await status_msg.edit(content=error_message)
+            else:
+                await interaction.followup.send(error_message)
+        else:
+            # Re-raise non-CUDA RuntimeErrors to be caught by general handler
+            raise
+
+    except discord.HTTPException as e:
+        bot.progress_logger.clear_step()
+        error_msg = f"<@{ADMIN_ID}> Discord error during upscale: {e.status} {e.text}"
+        logger.error(error_msg, exc_info=True)
+        if 'status_msg' in locals():
+            try:
+                await status_msg.edit(content=error_msg)
+            except discord.HTTPException:
+                pass  # Can't edit if Discord is having issues
+        else:
+            try:
+                await interaction.followup.send(error_msg)
+            except discord.HTTPException:
+                pass
+
     except Exception as e:
-        error_msg = f"Error during upscale: {str(e)}"
+        bot.progress_logger.clear_step()
+        # Get more details from the exception
+        error_type = type(e).__name__
+        error_details = str(e) if str(e) else repr(e)
+        error_msg = f"<@{ADMIN_ID}> Error during upscale ({error_type}): {error_details}"
         logger.error(error_msg, exc_info=True)
         if 'status_msg' in locals():
             await status_msg.edit(content=error_msg)
         else:
             await interaction.followup.send(error_msg)
+    
+    finally:
+        bot.progress_logger.clear_step()
+        torch.cuda.empty_cache()
+        gc.collect()
+        logger.info("Upscale cleanup completed, returned to idle state.")
 
 # Main execution
 if __name__ == "__main__":
